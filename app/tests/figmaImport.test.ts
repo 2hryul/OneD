@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { parseFig, type FigDocument, type FigNode } from 'openfig-core';
 import { figmaNodeId, importFigNode } from '../src/figmaImport';
+import { walkPage } from '../src/model';
 
 const figNode = (localID: number, type: string, name: string, x: number, y: number, width: number, height: number): FigNode => ({
   guid: { sessionID: 1, localID }, type, name, size: { x: width, y: height },
@@ -29,10 +30,11 @@ describe('Figma import', () => {
       childrenMap: new Map([['1:1', [text, instance]], ['1:4', [label]]])
     } as unknown as FigDocument;
     const imported = importFigNode(fig, '1:1');
-    expect(imported.document.nodes).toHaveLength(4);
-    expect(imported.document.nodes[0]).toMatchObject({ x: 0, y: 0, width: 320, height: 240 });
-    expect(imported.document.nodes[1]).toMatchObject({ x: 40, y: 50, text: 'Hello' });
-    expect(imported.document.nodes[3]).toMatchObject({ x: 105, y: 66, text: 'Changed' });
+    const shapes = walkPage(imported.document.pages[0]!);
+    expect(shapes).toHaveLength(4);
+    expect(shapes[0]).toMatchObject({ x: 0, y: 0, width: 320, height: 240 });
+    expect(shapes[1]).toMatchObject({ x: 40, y: 50, text: 'Hello' });
+    expect(shapes[3]).toMatchObject({ x: 105, y: 66, text: 'Changed' });
     expect(imported.report.expandedInstances).toBe(1);
     expect(imported.report.appliedOverrides).toBe(1);
     expect(imported.report.unappliedOverrides).toBe(0);
@@ -42,11 +44,10 @@ describe('Figma import', () => {
   (file ? it : it.skip)('imports the supplied Figma file node', () => {
     const parsed = parseFig(new Uint8Array(readFileSync(file!)));
     const imported = importFigNode(parsed, '779:23219');
-    expect(imported.document.nodes[0]).toMatchObject({ name: 'Contents', width: 1200, height: 2143 });
-    expect(imported.document.nodes.length).toBeGreaterThan(100);
+    const nodes = walkPage(imported.document.pages[0]!);
+    expect(nodes[0]).toMatchObject({ name: 'Contents', width: 1200, height: 2143 });
+    expect(nodes.length).toBeGreaterThan(100);
+    expect(nodes.length).toBe(Object.keys(imported.document.pages[0]!.objects).length);
     expect(imported.report.expandedInstances).toBeGreaterThan(0);
-    expect(new Set(imported.document.nodes.map((node) => node.id)).size).toBe(imported.document.nodes.length);
-    const ids = new Set(imported.document.nodes.map((node) => node.id));
-    expect(imported.document.nodes.every((node) => node.parentId === null || ids.has(node.parentId))).toBe(true);
   });
 });

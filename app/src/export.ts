@@ -1,4 +1,4 @@
-import { descendantsOf, type DesignDocument, type DesignNode } from './model';
+import { walkPage, type DesignNode, type Page } from './model';
 
 function identifier(name: string): string {
   const parts = name.normalize('NFKD').replace(/[^a-zA-Z0-9]+/g, ' ').trim().split(/\s+/).filter(Boolean);
@@ -34,10 +34,11 @@ function styleFor(node: DesignNode, root: DesignNode, isRoot: boolean): Record<s
   return style;
 }
 
-export function exportTsx(doc: DesignDocument, selectedId: string): { name: string; code: string } {
-  const root = doc.nodes.find((node) => node.id === selectedId);
+export function exportTsx(page: Page, selectedId: string): { name: string; code: string } {
+  const root = page.objects[selectedId];
   if (!root) throw new Error('Select a node to export');
-  const nodes = descendantsOf(doc, selectedId);
+  const hidden = new Set(walkPage(page, [selectedId]).filter((node) => node.hidden).flatMap((node) => walkPage(page, [node.id]).map((item) => item.id)));
+  const nodes = walkPage(page, [selectedId]).filter((node) => node.id === selectedId || !hidden.has(node.id));
   const name = identifier(root.name);
   const textNodes = nodes.filter((node) => node.type === 'text');
   const props = new Map(textNodes.map((node, index) => [node.id, propertyName(node, index)]));

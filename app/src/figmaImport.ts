@@ -1,5 +1,5 @@
 import { parseFig, resolveVectorNodePaths, type FigDocument, type FigNode, type FigPaint } from 'openfig-core';
-import type { DesignDocument, DesignNode, NodeType } from './model';
+import { pageFromNodes, type DesignDocument, type NodeInput, type NodeType } from './model.ts';
 
 export interface FigImportResult {
   document: DesignDocument;
@@ -56,7 +56,7 @@ export function importFigNode(fig: FigDocument, rootId: string): FigImportResult
   if (!root) throw new Error(`Figma 노드 ${rootId}를 찾지 못했습니다.`);
   if (!root.size) throw new Error('크기가 없는 노드는 가져올 수 없습니다. 프레임을 선택하세요.');
 
-  const nodes: DesignNode[] = [];
+  const nodes: NodeInput[] = [];
   const report = { imported: 0, expandedInstances: 0, unresolvedInstances: 0, approximatedShapes: 0, appliedOverrides: 0, unappliedOverrides: 0 };
   let totalOverrides = 0;
   const applied = new Set<string>();
@@ -77,14 +77,14 @@ export function importFigNode(fig: FigDocument, rootId: string): FigImportResult
     const symbol = symbolId ? fig.nodeMap.get(symbolId) : undefined;
     const width = Math.max(1, Math.round(effective.size.x));
     const height = Math.max(1, Math.round(effective.size.y));
-    const base: DesignNode = {
+    const base: NodeInput = {
       id, parentId, type, name: effective.name || type,
       x: Math.round(x), y: Math.round(y), width, height,
       fill: solidColor(effective.fillPaints ?? symbol?.fillPaints, type === 'text' ? '#17223a' : 'transparent'),
       sourceType: effective.type,
       ...(effective.opacity !== undefined ? { opacity: effective.opacity } : {}),
       ...(effective.cornerRadius !== undefined ? { radius: effective.cornerRadius } : {}),
-      ...(effective.stackMode && effective.stackMode !== 'NONE' ? { layout: effective.stackMode as DesignNode['layout'], gap: effective.stackSpacing ?? 0 } : {}),
+      ...(effective.stackMode && effective.stackMode !== 'NONE' ? { layout: effective.stackMode as NodeInput['layout'], gap: effective.stackSpacing ?? 0 } : {}),
       ...(type === 'text' ? { text: effective.textData?.characters ?? '', fontSize: effective.fontSize ?? 16,
         fontFamily: effective.fontName?.family ?? 'Arial', fontWeight: fontWeight(effective.fontName?.style) } : {})
     };
@@ -126,5 +126,6 @@ export function importFigNode(fig: FigDocument, rootId: string): FigImportResult
   walk(root, rootId, null, 0, 0, new Set());
   report.appliedOverrides = applied.size;
   report.unappliedOverrides = totalOverrides - applied.size;
-  return { document: { version: 1, name: `${root.name || 'Figma frame'} (${rootId})`, nodes }, report };
+  // walk가 부모를 먼저 방문하므로 형제 순서가 Figma 레이어 순서(아래에서 위)와 같다.
+  return { document: { version: 2, name: `${root.name || 'Figma frame'} (${rootId})`, pages: [pageFromNodes('page-1', 'Page 1', nodes)] }, report };
 }
