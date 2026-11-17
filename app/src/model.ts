@@ -1,4 +1,4 @@
-export type NodeType = 'frame' | 'rectangle' | 'ellipse' | 'text';
+export type NodeType = 'frame' | 'rectangle' | 'ellipse' | 'text' | 'vector';
 
 export interface DesignNode {
   id: string;
@@ -12,7 +12,14 @@ export interface DesignNode {
   fill: string;
   text?: string;
   fontSize?: number;
+  fontFamily?: string;
+  fontWeight?: number;
+  opacity?: number;
   radius?: number;
+  sourceType?: string;
+  layout?: 'HORIZONTAL' | 'VERTICAL' | 'GRID';
+  gap?: number;
+  vectorPaths?: Array<{ d: string; fill: string; stroke?: string; strokeWidth?: number }>;
 }
 
 export interface DesignDocument { version: 1; name: string; nodes: DesignNode[] }
@@ -69,7 +76,7 @@ export function parseDocument(raw: string): DesignDocument {
   if (candidate.version !== 1 || typeof candidate.name !== 'string' || !Array.isArray(candidate.nodes)) throw new Error('Unsupported document format');
   const ids = new Set<string>();
   for (const node of candidate.nodes) {
-    if (!node || typeof node.id !== 'string' || ids.has(node.id) || !['frame', 'rectangle', 'ellipse', 'text'].includes(node.type) ||
+    if (!node || typeof node.id !== 'string' || ids.has(node.id) || !['frame', 'rectangle', 'ellipse', 'text', 'vector'].includes(node.type) ||
       typeof node.name !== 'string' || typeof node.x !== 'number' || typeof node.y !== 'number' ||
       typeof node.width !== 'number' || typeof node.height !== 'number' || typeof node.fill !== 'string' ||
       !Number.isFinite(node.x) || !Number.isFinite(node.y) || !Number.isFinite(node.width) || !Number.isFinite(node.height) ||

@@ -2,4 +2,8 @@
 node_modules/
 dist/
 craft-project/
+*.cany/
+*.fig
+*.deck
+*.jam
 *.tsbuildinfo

@@ -4,7 +4,7 @@
 
 ## 구현 원칙
 
-사용자가 접근 가능한 Figma 편집 화면의 공개된 동작을 Craft Anything의 clean-room 모드로 관찰한다. 관찰 자료는 화면, 메뉴, 사용자 동작과 결과에 한정한다. 자체 문서 모델과 UI/렌더러를 구현하고, Figma의 소스·브랜드 자산은 사용하지 않는다. Craft Anything의 공식 안내도 clean-room 모드에서 원본 내부 코드·파일·페이지 소스를 읽지 않는다고 설명한다. [Craft Anything 공식 README](https://github.com/storytold/craft-anything#clean-room-or-deep)
+Figma 편집기 UI 복제에는 Craft Anything의 clean-room 방식으로 화면과 사용자 동작을 관찰한다. 사용자가 제공한 디자인을 D2C로 변환하는 경로에서는 사용자가 직접 저장한 `.fig` 파일을 로컬에서 읽는다. 두 입력을 별도로 취급하고 Figma의 소스·브랜드 자산을 편집기 코드에 넣지 않는다. [Craft Anything 공식 README](https://github.com/storytold/craft-anything#clean-room-or-deep)
 
 ## 작업 흐름
 
@@ -19,7 +19,7 @@ Craft Anything은 Study → Build → Check → Ready 흐름과 웹사이트 3�
 
 | 단계 | 구현 범위 | 완료 기준 |
 |---|---|---|
-| 0. 관찰 | 테스트 파일, 화면 캡처, 작업 시퀀스, 미확인 사항 | 각 핵심 동작에 원본 증거와 재현 단계가 있음 |
+| 0. 관찰 | 테스트 파일, 화면 캡처, 작업 시퀀스, 미확인 사항 | 보기 가능한 요소는 기록됨. 편집 동작 관찰은 편집 권한을 기다림 |
 | 1. 로컬 편집기 | 무한 캔버스, pan/zoom, 프레임·기본 도형·텍스트, 선택·이동·크기 변경, 레이어 트리, 속성 패널 | 새 문서→요소 배치→수정→저장→재열기가 성공; undo/redo 작동 |
 | 2. 레이아웃·재사용 | Auto Layout, 컴포넌트·인스턴스·variant, 디자인 토큰 | 컴포넌트 수정이 인스턴스에 반영되고 override가 유지됨 |
 | 3. D2C | 선택한 컴포넌트의 React/TSX, props, 스타일·에셋 내보내기 | 생성물이 독립 프로젝트에서 typecheck/build 통과, variant가 props로 표현됨 |
@@ -43,10 +43,10 @@ UI는 React + TypeScript로, 문서 모델은 UI 컴포넌트와 분리한다. �
 
 ## 필요한 입력과 제약
 
-- **대상 접근:** 사용자가 제공하는 테스트용 Figma 파일 및 편집기 접근. 이 PC에서 현재 Figma 앱이나 로그인된 편집기 탭은 확인되지 않았다.
+- **대상 접근:** 제공된 VNPL 디자인 파일은 Chrome에서 보기 권한으로 열렸고 `.fig` 로컬 복사본을 받을 수 있었다. 선택 노드 관찰 기록은 [figma-observation.md](figma-observation.md)에 있다. 편집·드래그·속성 수정 비교에는 편집 가능한 테스트 파일이 필요하다.
 - **비교 기준:** 최소 프레임/도형/텍스트 작업 시퀀스 하나와 기대 화면, 3개 viewport 너비.
 - **출력 정책:** 첫 결과는 독립된 React 컴포넌트 저장소에 내보낸다. 이 앱 자체는 Helm 저장소와 분리한다.
-- **AI 실행:** Craft Anything에서 Claude Code는 설치됐지만 로그인되지 않았다. Codex CLI는 로그인돼 있으나 실행 시 계정에서 지원하지 않는 모델 설정(`gpt-6-sol`)로 `model_not_found`가 발생했다. 전역 설정은 수정하지 않았다. 원본 관찰 전 백엔드 연결을 다시 검증한다. [Craft Anything AI 지원 상태](https://github.com/storytold/craft-anything#ai)
+- **AI 실행:** Craft Anything에서 Claude Code는 설치됐지만 로그인되지 않았다. Codex CLI는 로그인돼 있으나 실행 시 계정에서 지원하지 않는 모델 설정(`gpt-6-sol`)로 `model_not_found`가 발생했다. `web-browser-connect`는 clean-room 모드에서 Deep 전용 도구로 거부됐다. 전역 설정은 수정하지 않았다. [Craft Anything AI 지원 상태](https://github.com/storytold/craft-anything#ai)
 - **도구 버전:** Craft Anything v0.6.1, Windows x64 portable. 내부 `.tools/`에 설치하고 Git에는 넣지 않는다.
 
 ## 첫 검증 시나리오

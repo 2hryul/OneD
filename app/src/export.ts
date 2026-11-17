@@ -19,12 +19,15 @@ function styleFor(node: DesignNode, root: DesignNode, isRoot: boolean): Record<s
     boxSizing: 'border-box'
   };
   if (!isRoot) { style.left = node.x - root.x; style.top = node.y - root.y; }
-  if (node.type !== 'text') style.backgroundColor = node.fill;
+  if (node.type !== 'text' && node.type !== 'vector') style.backgroundColor = node.fill;
+  if (node.opacity !== undefined) style.opacity = node.opacity;
   if (node.type === 'ellipse') style.borderRadius = '50%';
   if (node.radius) style.borderRadius = node.radius;
   if (node.type === 'text') {
     style.color = node.fill;
     style.fontSize = node.fontSize ?? 18;
+    if (node.fontFamily) style.fontFamily = node.fontFamily;
+    if (node.fontWeight) style.fontWeight = node.fontWeight;
     style.whiteSpace = 'pre-wrap';
     style.overflow = 'hidden';
   }
@@ -44,6 +47,10 @@ export function exportTsx(doc: DesignDocument, selectedId: string): { name: stri
     if (node.type === 'text') {
       const value = props.get(node.id)!;
       return `      <span style={${style}}>{props.${value} ?? ${JSON.stringify(node.text ?? '')}}</span>`;
+    }
+    if (node.type === 'vector') {
+      const paths = (node.vectorPaths ?? []).map((path) => `<path d=${JSON.stringify(path.d)} fill=${JSON.stringify(path.fill)}${path.stroke ? ` stroke=${JSON.stringify(path.stroke)} strokeWidth={${path.strokeWidth ?? 1}}` : ''} />`).join('');
+      return `      <svg style={${style}} viewBox="0 0 ${node.width} ${node.height}" aria-hidden="true">${paths}</svg>`;
     }
     return `      <div style={${style}} />`;
   }).join('\n');

@@ -33,4 +33,13 @@ describe('React export', () => {
     expect(result.code).toContain('"left":44');
     expect(() => transformSync(result.code, { loader: 'tsx', jsx: 'automatic' })).not.toThrow();
   });
+
+  it('emits SVG paths for an imported vector', () => {
+    const doc = addNode(sampleDocument(), { id: 'vector-1', parentId: null, type: 'vector', name: 'Icon', x: 0, y: 0,
+      width: 10, height: 10, fill: 'transparent', vectorPaths: [{ d: 'M0 0 L10 10', fill: 'none', stroke: '#123456', strokeWidth: 2 }] });
+    const code = exportTsx(doc, 'vector-1').code;
+    expect(code).toContain('<svg');
+    expect(code).toContain('M0 0 L10 10');
+    expect(() => transformSync(code, { loader: 'tsx', jsx: 'automatic' })).not.toThrow();
+  });
 });
