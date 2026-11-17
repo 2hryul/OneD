@@ -37,7 +37,7 @@
 
 ## 3. 데이터 모델
 
-현재 [model.ts](app/src/model.ts)의 `DesignDocument`는 `version: 1`, 이름, `DesignNode[]`로 구성된다. 노드는 `id`, `parentId`, 유형(`frame`, `rectangle`, `ellipse`, `text`, `vector`), 절대 캔버스 좌표, 크기, 채우기와 유형별 속성을 가진다. 일부 Figma 원본 유형·Auto Layout 방향·간격을 메타데이터로 보존한다. 모델 명령은 추가·이동·수정·삭제와 하위 노드 탐색이다.
+현재 [model.ts](app/src/model.ts)의 `DesignDocument`는 `version: 2`, 이름, `pages[]`로 구성된다(2026-11-18 방안 A 1단계). 페이지는 `objects`(id → 노드)와 최상위 순서 `children`을 갖고, 프레임 노드는 자식 순서 `children`을 갖는다. 노드는 `id`, `parentId`, 유형(`frame`, `rectangle`, `ellipse`, `text`, `vector`), 페이지 절대 좌표, 크기, 2×3 `transform`, 채우기와 유형별 속성을 가진다. 편집은 [changes.ts](app/src/changes.ts)의 변경 목록(`addObj`, `modObj`, `delObj`, `movObjects`, `setDocument`)과 역변경의 쌍으로 표현하고, undo 기록도 이 쌍을 저장한다. version 1 JSON은 읽을 때 version 2로 변환한다.
 
 다음 모델 확장에서는 아래 개념을 구분한다.
 
@@ -56,7 +56,11 @@
 
 | 파일 | 현재 역할 |
 |---|---|
-| [app/src/App.tsx](app/src/App.tsx) | 편집기 UI, 입력 도구, 히스토리, 파일 열기, 캔버스 렌더 |
+| [app/src/App.tsx](app/src/App.tsx) | 편집기 상태, 포인터·키보드 조작, 히스토리, 파일 열기 |
+| [app/src/canvas.tsx](app/src/canvas.tsx) | 트리 그대로 중첩한 캔버스 렌더, 선택 상자·핸들·정렬선·사각형 선택 |
+| [app/src/panels.tsx](app/src/panels.tsx) | 페이지 목록, 레이어 트리(숨김·잠금·끌어서 순서 변경), 속성 패널 |
+| [app/src/changes.ts](app/src/changes.ts) | 변경·역변경 쌍, 이동·크기·회전·그룹·페이지 편집, 그룹 상자 보정, undo 기록 병합 |
+| [app/src/geometry.ts](app/src/geometry.ts), [selection.ts](app/src/selection.ts), [snapping.ts](app/src/snapping.ts) | 행렬·핸들 계산, 선택 대상·프레임 판정, 스냅 |
 | [app/src/model.ts](app/src/model.ts) | 문서 스키마와 순수 변경 명령 |
 | [app/src/figmaImport.ts](app/src/figmaImport.ts) | `.fig` 파싱 결과의 선택 노드·컴포넌트·override 변환과 보고 |
 | [app/src/export.ts](app/src/export.ts) | 선택 노드 → TSX 문자열 |
