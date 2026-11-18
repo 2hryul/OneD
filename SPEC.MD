@@ -18,6 +18,8 @@
 - Figma 파일은 **보기 권한**이다. 원본의 편집 동작은 아직 검증하지 못했다.
 - 내려받은 로컬 `.fig`는 사용자의 Downloads 폴더에 있을 수 있다. 코드와 테스트는 그 경로에 의존하지 않으며 Git에도 포함하지 않는다.
 - 실제 파일 파싱 기준: 전체 20,709노드/이미지 126개. 선택 노드의 원본 하위 103노드/인스턴스 27개. 현재 가져오기 결과는 227노드/펼친 인스턴스 45개/override 54개 적용·38개 미적용/도형 20개 근사.
+- 2026-11-18 방안 A 3단계 이후 가져오기 결과: 227노드, 펼친 인스턴스 45개, override 91개 적용·1개 미적용(`textData`, 경로에 맞는 노드 없음), 근사 도형 0개. 미적용이던 37개는 컴포넌트 루트를 가리키는 override였고, 근사 도형 20개는 `vectorData`(벡터 네트워크)로 복원했다.
+- 2026-11-18 방안 A 4단계: 가져온 Auto Layout 컨테이너를 레이아웃 엔진으로 다시 계산한 결과가 Figma가 파일에 저장한 위치·크기와 0.5px 안에서 모두 일치했다(Contents 103개 컨테이너·자식 186개, Mobile-Partners·Main·Switch 포함 자식 732개). 인스턴스 안쪽은 `derivedSymbolData`(Figma가 인스턴스 크기로 다시 계산해 저장한 값)를 적용해 맞췄다.
 
 ## 2. 사용자 흐름과 기능 계약
 
@@ -37,7 +39,7 @@
 
 ## 3. 데이터 모델
 
-현재 [model.ts](app/src/model.ts)의 `DesignDocument`는 `version: 2`, 이름, `pages[]`로 구성된다(2026-11-18 방안 A 1단계). 페이지는 `objects`(id → 노드)와 최상위 순서 `children`을 갖고, 프레임 노드는 자식 순서 `children`을 갖는다. 노드는 `id`, `parentId`, 유형(`frame`, `rectangle`, `ellipse`, `text`, `vector`), 페이지 절대 좌표, 크기, 2×3 `transform`, 채우기와 유형별 속성을 가진다. 편집은 [changes.ts](app/src/changes.ts)의 변경 목록(`addObj`, `modObj`, `delObj`, `movObjects`, `setDocument`)과 역변경의 쌍으로 표현하고, undo 기록도 이 쌍을 저장한다. version 1 JSON은 읽을 때 version 2로 변환한다.
+현재 [model.ts](app/src/model.ts)의 `DesignDocument`는 `version: 4`, 이름, `pages[]`로 구성된다(2026-11-18 방안 A 1·3·4단계). 프레임은 `layout`(Flex: 방향·줄바꿈·간격·여백·정렬)을, 자식은 `item`(fix·fill·auto 크기, min·max, absolute)과 `constraints`(left·right·center·left-right·scale)를 가진다. 편집할 때마다 레이아웃이 다시 계산되고 같은 undo 단위에 들어간다. 노드 스타일은 `fills`(단색·선형·원형·이미지), `strokes`, `effects`, 텍스트 정렬·줄 높이·자간·구간 스타일(`spans`)이다. 이미지 바이트는 IndexedDB에 두고 문서에는 이미지 해시만 둔다. version 1·2 JSON은 읽을 때 변환한다. 페이지는 `objects`(id → 노드)와 최상위 순서 `children`을 갖고, 프레임 노드는 자식 순서 `children`을 갖는다. 노드는 `id`, `parentId`, 유형(`frame`, `rectangle`, `ellipse`, `text`, `vector`), 페이지 절대 좌표, 크기, 2×3 `transform`, 채우기와 유형별 속성을 가진다. 편집은 [changes.ts](app/src/changes.ts)의 변경 목록(`addObj`, `modObj`, `delObj`, `movObjects`, `setDocument`)과 역변경의 쌍으로 표현하고, undo 기록도 이 쌍을 저장한다. version 1 JSON은 읽을 때 version 2로 변환한다.
 
 다음 모델 확장에서는 아래 개념을 구분한다.
 
@@ -61,6 +63,11 @@
 | [app/src/panels.tsx](app/src/panels.tsx) | 페이지 목록, 레이어 트리(숨김·잠금·끌어서 순서 변경), 속성 패널 |
 | [app/src/changes.ts](app/src/changes.ts) | 변경·역변경 쌍, 이동·크기·회전·그룹·페이지 편집, 그룹 상자 보정, undo 기록 병합 |
 | [app/src/geometry.ts](app/src/geometry.ts), [selection.ts](app/src/selection.ts), [snapping.ts](app/src/snapping.ts) | 행렬·핸들 계산, 선택 대상·프레임 판정, 스냅 |
+| [app/src/layout.ts](app/src/layout.ts), [layoutEdits.ts](app/src/layoutEdits.ts), [layoutPanels.tsx](app/src/layoutPanels.tsx), [figLayout.ts](app/src/figLayout.ts) | Flex 레이아웃 엔진과 제약, 편집 후 재배치·끌어 놓기 순서, 레이아웃 패널, Figma Auto Layout 변환 |
+| [app/src/styleCss.ts](app/src/styleCss.ts) | 채우기·선·효과·텍스트 스타일을 CSS로 (캔버스와 React 출력 공용) |
+| [app/src/stylePanels.tsx](app/src/stylePanels.tsx) | 채우기·선·효과·텍스트 편집 패널 |
+| [app/src/assets.ts](app/src/assets.ts) | 이미지 바이트 IndexedDB 저장, 형식 판별, base64 |
+| [app/src/figStyles.ts](app/src/figStyles.ts), [vectorNetwork.ts](app/src/vectorNetwork.ts), [report.tsx](app/src/report.tsx) | Figma 스타일 변환, 벡터 네트워크 경로 복원, 가져오기 보고서 |
 | [app/src/model.ts](app/src/model.ts) | 문서 스키마와 순수 변경 명령 |
 | [app/src/figmaImport.ts](app/src/figmaImport.ts) | `.fig` 파싱 결과의 선택 노드·컴포넌트·override 변환과 보고 |
 | [app/src/export.ts](app/src/export.ts) | 선택 노드 → TSX 문자열 |
