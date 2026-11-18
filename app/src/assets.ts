@@ -19,6 +19,44 @@ export function sniffImageMime(bytes: Uint8Array): string | null {
   return null;
 }
 
+const DEFAULT_SVG_SIZE = { width: 100, height: 100 };
+
+/** SVG 길이 속성을 px 숫자로 읽는다. 단위 없음과 px만 받고, %·em처럼 주변에 따라 바뀌는 길이는 null. */
+function svgLength(value: string | undefined): number | null {
+  const match = value?.trim().match(/^([0-9]*\.?[0-9]+)(px)?$/);
+  const number = match ? Number(match[1]) : Number.NaN;
+  return Number.isFinite(number) && number > 0 ? number : null;
+}
+
+/**
+ * SVG 문서가 스스로 정한 크기. 루트 <svg>의 width·height를 먼저 보고, 없으면 viewBox 크기를 쓴다.
+ * 둘 다 없으면 null. 브라우저마다 크기 없는 SVG의 기본값(150×150 등)이 달라서 직접 읽는다.
+ */
+export function svgIntrinsicSize(text: string): { width: number; height: number } | null {
+  const tag = text.match(/<svg\b[^>]*>/i)?.[0];
+  if (!tag) return null;
+  const attr = (name: string): string | undefined => tag.match(new RegExp(`\\s${name}\\s*=\\s*["']([^"']*)["']`, 'i'))?.[1];
+  const box = attr('viewBox')?.trim().split(/[\s,]+/).map(Number);
+  const boxSize = box && box.length === 4 && box[2]! > 0 && box[3]! > 0 ? { width: box[2]!, height: box[3]! } : null;
+  const width = svgLength(attr('width'));
+  const height = svgLength(attr('height'));
+  if (width && height) return { width, height };
+  // 한쪽만 있으면 viewBox 비율로 나머지를 정한다(브라우저와 같은 규칙).
+  if (boxSize && width) return { width, height: (width * boxSize.height) / boxSize.width };
+  if (boxSize && height) return { width: (height * boxSize.width) / boxSize.height, height };
+  return boxSize;
+}
+
+/**
+ * 그림의 원래 크기(px). Chromium의 createImageBitmap은 SVG를 해석하지 못해("The source image could not be decoded")
+ * SVG는 문서의 width·height·viewBox에서 읽고, 크기를 정하지 않은 SVG는 100×100으로 둔다.
+ */
+export async function readImageSize(bytes: Uint8Array, mime: string): Promise<{ width: number; height: number }> {
+  if (mime === 'image/svg+xml') return svgIntrinsicSize(new TextDecoder().decode(bytes)) ?? DEFAULT_SVG_SIZE;
+  const bitmap = await createImageBitmap(new Blob([bytes as unknown as ArrayBuffer], { type: mime }));
+  try { return { width: bitmap.width, height: bitmap.height }; } finally { bitmap.close(); }
+}
+
 export function bytesToBase64(bytes: Uint8Array): string {
   let binary = '';
   for (let index = 0; index < bytes.length; index += 0x8000) binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));

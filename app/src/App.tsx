@@ -29,7 +29,7 @@ import type { PluginHost, PluginInfo } from './pluginApi';
 import { LayersPanel, PagesPanel, PropertiesPanel, type DropPosition } from './panels';
 import { exportTsx } from './export';
 import { figmaNodeId, importFigFile, type ImportReport } from './figmaImport';
-import { base64ToBytes, bytesToBase64, contentId, getAssets, putAssets, referencedAssets, sniffImageMime, type AssetRecord } from './assets';
+import { base64ToBytes, bytesToBase64, contentId, getAssets, putAssets, readImageSize, referencedAssets, sniffImageMime, type AssetRecord } from './assets';
 import { ImportReportModal } from './report';
 import { AssetsPanel } from './assetsPanel';
 import { ComponentSection, TokenSection } from './componentPanels';
@@ -467,15 +467,16 @@ export function App(): JSX.Element {
       const bytes = new Uint8Array(await file.arrayBuffer());
       const mime = sniffImageMime(bytes);
       if (!mime) { setNotice('[pasteImageFile] 붙여 넣은 그림 형식을 알 수 없습니다.'); return; }
+      // 크기를 먼저 읽는다. 해석에 실패한 그림이 저장소에 남지 않게 하기 위해서다.
+      const raw = await readImageSize(bytes, mime);
+      const size = { width: Math.round(raw.width * 100) / 100, height: Math.round(raw.height * 100) / 100 };
       const id = await contentId(bytes);
       await storeAssets([{ id, mime, bytes }]);
-      const bitmap = await createImageBitmap(new Blob([bytes as unknown as ArrayBuffer], { type: mime }));
       const viewport = viewportRef.current?.getBoundingClientRect();
       const center = viewport ? toWorld(viewport.left + viewport.width / 2, viewport.top + viewport.height / 2) : { x: 0, y: 0 };
       const frame = frameAt(page, center, new Set());
       const nodeId = crypto.randomUUID();
-      const input: NodeInput = { id: nodeId, type: 'rectangle', name: file.name || 'Image', parentId: frame?.id ?? null, x: Math.round(center.x - bitmap.width / 2), y: Math.round(center.y - bitmap.height / 2), width: bitmap.width, height: bitmap.height, fills: [{ type: 'image', assetId: id, fit: 'fill' }] };
-      bitmap.close();
+      const input: NodeInput = { id: nodeId, type: 'rectangle', name: file.name || 'Image', parentId: frame?.id ?? null, x: Math.round(center.x - size.width / 2), y: Math.round(center.y - size.height / 2), width: size.width, height: size.height, fills: [{ type: 'image', assetId: id, fit: 'fill' }] };
       if (edit((current) => addShape(current, page.id, input))) { setSelectedIds([nodeId]); setTool('select'); }
     } catch (error) { setNotice(`[pasteImageFile] 그림 붙여 넣기 실패: ${message(error)}`); }
   };
