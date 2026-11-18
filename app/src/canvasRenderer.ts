@@ -63,6 +63,25 @@ export function drawPage(ctx: CanvasRenderingContext2D, page: Page, view: View, 
   return state.stats;
 }
 
+/** 내보낼 영역(페이지 좌표). 고른 도형 상자를 합치고 그림자·흐림이 번지는 만큼 넓힌다. */
+export function exportBox(page: Page, ids: readonly string[]): Rect | null {
+  const nodes = ids.map((id) => page.objects[id]).filter((node): node is DesignNode => Boolean(node && !node.hidden));
+  if (nodes.length === 0) return null;
+  const boxes = nodes.map((node) => { const box = boundsOf(worldCorners(node)); const margin = shadowMargin(node); return { x: box.x - margin, y: box.y - margin, width: box.width + margin * 2, height: box.height + margin * 2 }; });
+  const x = Math.min(...boxes.map((box) => box.x));
+  const y = Math.min(...boxes.map((box) => box.y));
+  return { x, y, width: Math.max(...boxes.map((box) => box.x + box.width)) - x, height: Math.max(...boxes.map((box) => box.y + box.height)) - y };
+}
+
+/**
+ * 고른 도형들을 그림 하나에 그린다(PNG 내보내기). 캔버스 렌더러와 같은 그리기를 쓰므로 화면과 같은 모양이 나온다.
+ * 부모의 자르기·투명도는 적용하지 않는다(Figma 내보내기와 같음).
+ */
+export function renderNodes(ctx: CanvasRenderingContext2D, page: Page, ids: readonly string[], box: Rect, scale: number, images: ImageSource): void {
+  const state: DrawState = { ctx, page, base: [scale, 0, 0, scale, -box.x * scale, -box.y * scale], visible: box, zoom: scale, scale, images, skipId: null, stats: { drawn: 0, culled: 0, ms: 0, cached: 0, stale: false } };
+  for (const id of ids) drawNode(state, id, 1);
+}
+
 interface DrawState { ctx: CanvasRenderingContext2D; page: Page; base: Matrix; visible: Rect; zoom: number; scale: number; images: ImageSource; skipId: string | null; stats: DrawStats }
 
 function intersects(a: Rect, b: Rect): boolean {
@@ -109,7 +128,7 @@ function sameNodes(a: readonly DesignNode[], b: readonly DesignNode[]): boolean 
 }
 
 /** 프레임 자신의 그림자가 상자 밖으로 번지는 거리. 자식은 프레임이 자르므로 프레임 효과만 본다. */
-function shadowMargin(node: DesignNode): number {
+export function shadowMargin(node: DesignNode): number {
   return (node.effects ?? []).reduce((margin, effect) => effect.type === 'drop-shadow' ? Math.max(margin, Math.abs(effect.x) + Math.abs(effect.y) + effect.blur * 2 + effect.spread) : effect.type === 'layer-blur' ? Math.max(margin, effect.radius * 2) : margin, 0);
 }
 
@@ -328,8 +347,8 @@ function drawFrameTitles(state: DrawState, view: View): void {
   ctx.restore();
 }
 
-interface TextPiece { text: string; font: string; color: string; x: number; width: number }
-interface TextLine { pieces: TextPiece[]; width: number; height: number; ascent: number; descent: number }
+export interface TextPiece { text: string; font: string; color: string; x: number; width: number }
+export interface TextLine { pieces: TextPiece[]; width: number; height: number; ascent: number; descent: number }
 
 const textCache = new WeakMap<DesignNode, TextLine[]>();
 
@@ -342,7 +361,7 @@ function fontOf(node: DesignNode, span?: NonNullable<DesignNode['spans']>[number
  * 글을 상자 너비에 맞춰 줄로 나눈다(CSS pre-wrap과 같게 공백을 지키고 단어 단위로 줄바꿈, \n은 강제 줄바꿈).
  * 노드 객체마다 결과를 보관해, 글을 고치지 않으면 다시 재지 않는다.
  */
-function layoutText(ctx: CanvasRenderingContext2D, node: DesignNode): TextLine[] {
+export function layoutText(ctx: CanvasRenderingContext2D, node: DesignNode): TextLine[] {
   const cached = textCache.get(node);
   if (cached) return cached;
   ctx.save();
@@ -373,27 +392,33 @@ function layoutText(ctx: CanvasRenderingContext2D, node: DesignNode): TextLine[]
   return lines;
 }
 
+/** 줄마다 위치(도형 지역 좌표): 가로 정렬로 정한 시작 x, 줄 위쪽 y, 글자 기준선 y. 캔버스 그리기와 SVG 내보내기가 같이 쓴다. */
+export function placeLines(node: DesignNode, lines: readonly TextLine[]): Array<{ line: TextLine; x: number; top: number; baseline: number }> {
+  const total = lines.reduce((sum, line) => sum + line.height, 0);
+  let top = node.verticalAlign === 'middle' ? (node.height - total) / 2 : node.verticalAlign === 'bottom' ? node.height - total : 0;
+  return lines.map((line) => {
+    const x = node.textAlign === 'center' ? (node.width - line.width) / 2 : node.textAlign === 'right' ? node.width - line.width : 0;
+    const placed = { line, x, top, baseline: top + (line.height - (line.ascent + line.descent)) / 2 + line.ascent };
+    top += line.height;
+    return placed;
+  });
+}
+
 /** 텍스트. 상자로 자르고, 세로 정렬과 가로 정렬을 DOM과 같게 한다. 화면에서 너무 작으면 막대로 대신한다. */
 function drawText(state: DrawState, node: DesignNode): void {
   const { ctx } = state;
-  const lines = layoutText(ctx, node);
-  const total = lines.reduce((sum, line) => sum + line.height, 0);
-  let y = node.verticalAlign === 'middle' ? (node.height - total) / 2 : node.verticalAlign === 'bottom' ? node.height - total : 0;
   const greek = (node.fontSize ?? 18) * state.zoom < GREEK_PIXELS;
   ctx.save();
   ctx.beginPath(); ctx.rect(0, 0, node.width, node.height); ctx.clip();
   ctx.letterSpacing = `${node.letterSpacing ?? 0}px`;
   ctx.textBaseline = 'alphabetic';
-  for (const line of lines) {
-    const x0 = node.textAlign === 'center' ? (node.width - line.width) / 2 : node.textAlign === 'right' ? node.width - line.width : 0;
-    const baseline = y + (line.height - (line.ascent + line.descent)) / 2 + line.ascent;
+  for (const { line, x, top, baseline } of placeLines(node, layoutText(ctx, node))) {
     for (const piece of line.pieces) {
       ctx.fillStyle = piece.color;
-      if (greek) { if (piece.text.trim()) { ctx.globalAlpha *= 0.35; ctx.fillRect(x0 + piece.x, y + line.height * 0.3, piece.width, line.height * 0.4); ctx.globalAlpha /= 0.35; } continue; }
+      if (greek) { if (piece.text.trim()) { ctx.globalAlpha *= 0.35; ctx.fillRect(x + piece.x, top + line.height * 0.3, piece.width, line.height * 0.4); ctx.globalAlpha /= 0.35; } continue; }
       ctx.font = piece.font;
-      ctx.fillText(piece.text, x0 + piece.x, baseline);
+      ctx.fillText(piece.text, x + piece.x, baseline);
     }
-    y += line.height;
   }
   ctx.restore();
 }

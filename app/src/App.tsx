@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ChangeEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
-import { emptyPage, parseDocument, solid, walkPage, type BoolOp, type DesignDocument, type DesignNode, type Matrix, type NodeInput, type Page, type Paint, type SubPath } from './model';
+import { emptyPage, isContainer, parseDocument, solid, walkPage, type BoolOp, type DesignDocument, type DesignNode, type Matrix, type NodeInput, type Page, type Paint, type SubPath } from './model';
 import {
   EMPTY_TRANSACTION, addPage, addShape, applyChanges, childrenOf, composeTransactions, createBoolean, deleteShapes, fitPathBounds, flattenToPath, groupShapes, moveMany,
   recordTransaction, removeToken, reparentShape, replaceDocument, setToken, resizeShape, rotateShape, topLevelIds, ungroupShape, updateShape,
@@ -18,6 +18,10 @@ import { CANVAS_THRESHOLD, CanvasView, type RendererPreference } from './canvasV
 import { frameTitleAt, hitTest } from './hitTest';
 import { TITLE_HEIGHT } from './canvasRenderer';
 import { PluginManager, PluginPanel } from './pluginPanels';
+import { copyNodes, parseClipboard, pasteNodes, selectAllIds, type ClipboardData } from './clipboard';
+import { alignNodes, distributeNodes, type AlignMode, type DistributeAxis } from './align';
+import { AlignBar, ExportImageRow, type ExportChoice } from './alignBar';
+import { exportImage, safeFileName } from './imageExport';
 import type { PluginHost, PluginInfo } from './pluginApi';
 import { LayersPanel, PagesPanel, PropertiesPanel, type DropPosition } from './panels';
 import { exportTsx } from './export';
@@ -82,6 +86,16 @@ function useStable<A extends unknown[], R>(fn: (...args: A) => R): (...args: A) 
   ref.current = fn;
   return useCallback((...args: A) => ref.current(...args), []);
 }
+
+function downloadBlob(name: string, blob: Blob): void {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url; anchor.download = name; anchor.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/** Alt+글자 정렬 단축키(Figma와 같음). */
+const ALIGN_KEYS: Record<string, AlignMode> = { a: 'left', d: 'right', h: 'h-center', w: 'top', s: 'bottom', v: 'v-center' };
 
 function pageOf(doc: DesignDocument, pageId: string): Page {
   return doc.pages.find((page) => page.id === pageId) ?? doc.pages[0]!;
@@ -379,12 +393,124 @@ export function App(): JSX.Element {
     if (edit((current) => composeTransactions(current, groups.map((id) => (next: DesignDocument) => ungroupShape(next, page.id, id))))) setSelectedIds(children);
   };
 
+  /** 시스템 클립보드를 못 쓸 때(이벤트 없이 메뉴에서 부를 때) 쓰는 마지막 복사 내용. */
+  const clipboardRef = useRef<ClipboardData | null>(null);
+
+  /**
+   * 붙여 넣기. 프레임 하나를 고른 채 붙이면 그 안 가운데에, 아니면 원래 부모(이 페이지에 있으면)의 같은 자리에 넣는다.
+   * 새 도형을 선택한다. 반환값은 성공 여부.
+   */
+  const pasteData = (data: ClipboardData): boolean => {
+    const target = selected && isContainer(selected) && !selected.boolOp && !data.roots.includes(selected.id) && selected.type === 'frame' ? selected : null;
+    const firstParent = data.nodes.find((node) => node.id === data.roots[0])?.parentId ?? null;
+    const parentId = target ? target.id : firstParent && page.objects[firstParent] ? firstParent : null;
+    const rootNodes = data.nodes.filter((node) => data.roots.includes(node.id));
+    const bounds = boundsOf(rootNodes.flatMap(worldCorners));
+    const dx = target ? Math.round(target.x + (target.width - bounds.width) / 2 - bounds.x) : 0;
+    const dy = target ? Math.round(target.y + (target.height - bounds.height) / 2 - bounds.y) : 0;
+    let rootIds: string[] = [];
+    const done = edit((current) => { const pasted = pasteNodes(current, page.id, data, { parentId, dx, dy, newId: () => crypto.randomUUID() }); rootIds = pasted.rootIds; return pasted.tx; });
+    if (done) { setSelectedIds(rootIds); setTool('select'); }
+    return done;
+  };
+
+  /** 복제(Ctrl+D). 같은 부모의 원본 바로 위에 넣는다. 최상위 프레임은 겹치지 않게 오른쪽 빈자리로 옮긴다(Penpot과 같음). */
+  const duplicateSelection = (): void => {
+    const data = copyNodes(page, liveSelection);
+    if (!data) return;
+    const roots = data.nodes.filter((node) => data.roots.includes(node.id));
+    const parentId = roots[0]!.parentId;
+    const sameParent = roots.every((node) => node.parentId === parentId);
+    const siblings = childrenOf(page, sameParent ? parentId : null);
+    const index = sameParent ? Math.max(...data.roots.map((id) => siblings.indexOf(id))) + 1 : undefined;
+    const bounds = boundsOf(roots.flatMap(worldCorners));
+    const dx = parentId === null && roots.every((node) => node.type === 'frame') ? Math.round(bounds.width + 40) : 0;
+    let rootIds: string[] = [];
+    if (edit((current) => { const pasted = pasteNodes(current, page.id, data, { parentId: sameParent ? parentId : null, index, dx, dy: 0, newId: () => crypto.randomUUID() }); rootIds = pasted.rootIds; return pasted.tx; })) setSelectedIds(rootIds);
+  };
+
+  /** 클립보드의 그림 파일을 같은 크기의 이미지 사각형으로 넣는다(화면 가운데, 그 아래 프레임이 있으면 그 안). */
+  const pasteImageFile = async (file: File): Promise<void> => {
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const mime = sniffImageMime(bytes);
+      if (!mime) { setNotice('[pasteImageFile] 붙여 넣은 그림 형식을 알 수 없습니다.'); return; }
+      const id = await contentId(bytes);
+      await storeAssets([{ id, mime, bytes }]);
+      const bitmap = await createImageBitmap(new Blob([bytes as unknown as ArrayBuffer], { type: mime }));
+      const viewport = viewportRef.current?.getBoundingClientRect();
+      const center = viewport ? toWorld(viewport.left + viewport.width / 2, viewport.top + viewport.height / 2) : { x: 0, y: 0 };
+      const frame = frameAt(page, center, new Set());
+      const nodeId = crypto.randomUUID();
+      const input: NodeInput = { id: nodeId, type: 'rectangle', name: file.name || 'Image', parentId: frame?.id ?? null, x: Math.round(center.x - bitmap.width / 2), y: Math.round(center.y - bitmap.height / 2), width: bitmap.width, height: bitmap.height, fills: [{ type: 'image', assetId: id, fit: 'fill' }] };
+      bitmap.close();
+      if (edit((current) => addShape(current, page.id, input))) { setSelectedIds([nodeId]); setTool('select'); }
+    } catch (error) { setNotice(`[pasteImageFile] 그림 붙여 넣기 실패: ${message(error)}`); }
+  };
+
+  /** 글을 붙여 넣으면 텍스트 레이어를 만든다(Figma와 같음). */
+  const pasteText = (text: string): void => {
+    const viewport = viewportRef.current?.getBoundingClientRect();
+    const center = viewport ? toWorld(viewport.left + viewport.width / 2, viewport.top + viewport.height / 2) : { x: 0, y: 0 };
+    const frame = frameAt(page, center, new Set());
+    const nodeId = crypto.randomUUID();
+    const content = text.slice(0, 10_000);
+    const lines = content.split('\n');
+    const width = Math.min(600, Math.max(40, Math.max(...lines.map((line) => line.length)) * 11));
+    const input: NodeInput = { id: nodeId, type: 'text', name: content.slice(0, 40).trim() || 'Text', parentId: frame?.id ?? null, x: Math.round(center.x - width / 2), y: Math.round(center.y), width, height: Math.max(26, lines.length * 26), fills: solid('#17223a'), text: content, fontSize: 18 };
+    if (edit((current) => addShape(current, page.id, input))) { setSelectedIds([nodeId]); setTool('select'); }
+  };
+
+  const alignSelection = (mode: AlignMode): void => { edit((current) => alignNodes(current, page.id, topLevelIds(page, liveSelection), mode)); };
+  const distributeSelection = (axis: DistributeAxis): void => { edit((current) => distributeNodes(current, page.id, topLevelIds(page, liveSelection), axis)); };
+
+  /** 고른 요소를 그림 파일로 내려받는다. 여럿이면 합친 영역 하나로. */
+  const exportSelection = (choice: ExportChoice): void => {
+    const ids = topLevelIds(page, liveSelection);
+    if (ids.length === 0) { setNotice('내보낼 요소를 고르세요.'); return; }
+    const base = safeFileName(ids.length === 1 ? page.objects[ids[0]!]!.name : `${page.name} 선택`);
+    setNotice('그림을 만드는 중…');
+    exportImage(page, ids, choice.format, choice.scale)
+      .then((blob) => { downloadBlob(`${base}${choice.format === 'png' && choice.scale !== 1 ? `@${choice.scale}x` : ''}.${choice.format}`, blob); setNotice(`${base}을(를) ${choice.format.toUpperCase()}로 내보냈습니다.`); })
+      .catch((error: unknown) => setNotice(message(error)));
+  };
+
   const deleteSelection = (): void => {
     const ids = topLevelIds(page, liveSelection);
     if (ids.length === 0) return;
     edit((current) => deleteShapes(current, page.id, ids));
     setSelectedIds([]);
   };
+
+  // 복사·잘라내기·붙여 넣기는 브라우저 클립보드 이벤트로 받는다. 권한 창 없이 시스템 클립보드를 쓰고, 다른 프로그램과도 글·그림을 주고받는다.
+  useEffect(() => {
+    const typing = (event: ClipboardEvent): boolean => event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || Boolean(viewerStart);
+    const onCopy = (event: ClipboardEvent): void => {
+      if (typing(event)) return;
+      const data = copyNodes(page, liveSelection);
+      if (!data) return;
+      event.preventDefault();
+      event.clipboardData?.setData('text/plain', JSON.stringify(data));
+      clipboardRef.current = data;
+      if (event.type === 'cut') deleteSelection();
+      else setNotice(`${data.roots.length}개 요소를 복사했습니다.`);
+    };
+    const onPaste = (event: ClipboardEvent): void => {
+      if (typing(event)) return;
+      const image = [...(event.clipboardData?.files ?? [])].find((file) => file.type.startsWith('image/'));
+      if (image) { event.preventDefault(); void pasteImageFile(image); return; }
+      const text = event.clipboardData?.getData('text/plain') ?? '';
+      try {
+        const data = parseClipboard(text);
+        if (data) { event.preventDefault(); pasteData(data); return; }
+      } catch (error) { setNotice(message(error)); return; }
+      if (text.trim()) { event.preventDefault(); pasteText(text); }
+    };
+    document.addEventListener('copy', onCopy);
+    document.addEventListener('cut', onCopy);
+    document.addEventListener('paste', onPaste);
+    return () => { document.removeEventListener('copy', onCopy); document.removeEventListener('cut', onCopy); document.removeEventListener('paste', onPaste); };
+  });
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
@@ -404,6 +530,13 @@ export function App(): JSX.Element {
       if (mod && key === 'z') { event.preventDefault(); if (event.shiftKey) redo(); else undo(); return; }
       if (mod && key === 'y') { event.preventDefault(); redo(); return; }
       if (mod && event.altKey && key === 'k') { event.preventDefault(); makeComponent(); return; }
+      if (mod && key === 'a') { event.preventDefault(); setTool('select'); setSelectedIds(selectAllIds(page, liveSelection)); return; }
+      if (mod && key === 'd') { event.preventDefault(); duplicateSelection(); return; }
+      if (mod && event.shiftKey && key === 'e') { event.preventDefault(); exportSelection({ format: 'png', scale: 2 }); return; }
+      if (event.altKey && !mod && liveSelection.length) {
+        if (event.shiftKey && (key === 'h' || key === 'v')) { event.preventDefault(); distributeSelection(key === 'h' ? 'horizontal' : 'vertical'); return; }
+        if (!event.shiftKey && ALIGN_KEYS[key]) { event.preventDefault(); alignSelection(ALIGN_KEYS[key]!); return; }
+      }
       if (mod && key === 'g') { event.preventDefault(); if (event.shiftKey) ungroupSelection(); else groupSelection(); return; }
       if (event.key === 'Delete' || event.key === 'Backspace') { event.preventDefault(); deleteSelection(); return; }
       if (event.key === 'Escape') { setTool('select'); setSelectedIds([]); return; }
@@ -858,6 +991,7 @@ export function App(): JSX.Element {
             <button className={rightTab === 'design' ? 'active' : ''} onClick={() => setRightTab('design')}>디자인</button>
             <button className={rightTab === 'prototype' ? 'active' : ''} onClick={() => setRightTab('prototype')}>프로토타입</button>
           </div>
+          {rightTab === 'design' && liveSelection.length > 0 ? <AlignBar count={topLevelIds(page, liveSelection).length} onAlign={alignSelection} onDistribute={distributeSelection} /> : null}
           {rightTab === 'prototype' ? (selected
             ? <PrototypePanel key={selected.id} page={page} node={selected}
               onChange={(interactions) => edit((current) => updateShape(current, page.id, selected.id, { interactions: interactions.length ? interactions : undefined }), `${selected.id}:interactions`)}
@@ -872,8 +1006,9 @@ export function App(): JSX.Element {
             onChange={(patch) => setProperty(selected, patch)}
             onRotate={(degrees) => edit((current) => rotateShape(current, page.id, selected.id, degrees - rotationDegrees(selected.transform)), `${selected.id}:rotation`)}
             onOpenCode={() => setCodeOpen(true)}
-            onDelete={deleteSelection} />
-            : liveSelection.length > 1 ? <div className="nothing-selected"><span>⧉</span><strong>{liveSelection.length}개 선택됨</strong><p>Ctrl+G로 묶거나 Delete로 지울 수 있습니다.</p><button className="wide-action" onClick={groupSelection}>그룹으로 묶기</button><BooleanButtons onApply={applyBoolean} />{liveSelection.every((id) => page.objects[id]?.mainInstance) ? <button className="wide-action" onClick={combineSelection}>⬖ variant로 묶기</button> : null}</div>
+            onDelete={deleteSelection}
+            exportRow={<ExportImageRow onExport={exportSelection} />} />
+            : liveSelection.length > 1 ? <div className="nothing-selected"><span>⧉</span><strong>{liveSelection.length}개 선택됨</strong><p>Ctrl+G로 묶거나 Delete로 지울 수 있습니다.</p><button className="wide-action" onClick={groupSelection}>그룹으로 묶기</button><BooleanButtons onApply={applyBoolean} /><ExportImageRow onExport={exportSelection} />{liveSelection.every((id) => page.objects[id]?.mainInstance) ? <button className="wide-action" onClick={combineSelection}>⬖ variant로 묶기</button> : null}</div>
             : <div className="nothing-selected"><span>◈</span><strong>선택된 요소가 없습니다</strong><p>캔버스나 레이어에서 요소를 선택하면 속성이 표시됩니다.</p></div>}
         </aside>
       </div>

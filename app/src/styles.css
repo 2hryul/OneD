@@ -180,3 +180,9 @@
 .plugin-approve footer{display:flex;justify-content:flex-end;gap:8px}
 /* 도형 안 SVG는 줄 기준선에 놓이지 않게 한다(인라인이면 작은 벡터가 아래로 밀려 부모 프레임에서 잘린다). */
 .design-node>svg{display:block}
+.align-bar{display:flex;align-items:center;gap:2px;padding:8px 10px;border-bottom:1px solid #343a46}
+.align-bar button{width:26px;height:26px;border:0;border-radius:5px;background:transparent;color:#c5ccdb;font-size:14px}
+.align-bar button:hover:not(:disabled){background:#343a48;color:#fff}
+.align-divider{width:1px;height:18px;margin:0 4px;background:#404655}
+.export-row{margin-bottom:8px;width:100%}
+.export-row select{flex:1;min-height:30px;padding:4px 6px;border:1px solid #434a5a;border-radius:6px;background:#2b303d;color:#eef1f8;font-size:11px}

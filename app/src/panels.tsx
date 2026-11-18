@@ -134,9 +134,11 @@ interface PropertiesPanelProps {
   tokens?: ReactNode;
   /** 불리언·경로 편집 영역. 도형 속성 뒤에 넣는다. */
   path?: ReactNode;
+  /** 내보내기 영역에 덧붙일 그림 내보내기 줄. */
+  exportRow?: ReactNode;
 }
 
-export function PropertiesPanel({ node, parent, header, tokens, path, onChange, onRotate, onOpenCode, onDelete, onPickImage }: PropertiesPanelProps): JSX.Element {
+export function PropertiesPanel({ node, parent, header, tokens, path, exportRow, onChange, onRotate, onOpenCode, onDelete, onPickImage }: PropertiesPanelProps): JSX.Element {
   return (
     <div className="properties">
       <div className="selection-header"><span className="selection-icon">{nodeIcon(node)}</span><div><strong>{node.name}</strong><small>{node.sourceType ?? node.type}</small></div></div>
@@ -159,7 +161,7 @@ export function PropertiesPanel({ node, parent, header, tokens, path, onChange, 
       <EffectsSection node={node} onChange={onChange} />
       {path}
       {tokens}
-      <div className="section-title">내보내기</div><button className="wide-action" onClick={onOpenCode}>React 컴포넌트 보기 →</button>
+      <div className="section-title">내보내기</div>{exportRow}<button className="wide-action" onClick={onOpenCode}>React 컴포넌트 보기 →</button>
       <button className="danger-link" onClick={onDelete}>요소 삭제</button>
     </div>
   );
