@@ -26,6 +26,7 @@
 - 2026-11-18 방안 A 8단계: 협업 서버(`npm run server`)에 계정을 만들고 문서를 공유 파일로 올리면, 같은 파일을 연 사람들의 변경이 서버가 정한 순서로 모두에게 적용된다. 참여자 얼굴·커서, 캔버스 위치 코멘트(답글·해결·삭제), 이름 붙인 버전 저장·복원이 있다.
 - 2026-11-18 방안 A 9단계: 보이는 도형이 3,000개를 넘으면 Canvas 렌더러(보이는 영역만 그림, 최상위 프레임 그림 보관)로 자동 전환한다(상태 표시줄에서 DOM·Canvas 고정 가능). 도형 20,400개 문서에서 화면 이동 한 프레임이 DOM 63ms → Canvas 16ms다. 플러그인은 격리된 iframe에서 `canvasStudio` API로 문서를 읽고 고친다([app/plugins/README.md](app/plugins/README.md)).
 - 2026-11-18 기본 편집 보강: 복사·잘라내기·붙여 넣기(시스템 클립보드, 다른 프로그램의 글·그림 붙여 넣기 포함), 복제(Ctrl+D), 전체 선택(Ctrl+A), 정렬 6종·간격 맞추기(Alt 단축키), 선택 영역 PNG(1·2·3배)·SVG 내보내기(Ctrl+Shift+E).
+- 2026-11-18 조작 보강: 방향키 이동(Shift 10px, 오토 레이아웃 안에서는 순서 바꾸기), 레이어 순서 단축키(Ctrl+]·[ 한 칸, Ctrl+Shift+]·[ 맨 위·아래), 확대 단축키(Ctrl+0 100%, Shift+1 전체, Shift+2 선택, Ctrl+=·-), 확대 범위 2~800%, 레이어 이름 더블클릭 바꾸기, 화면 이동·확대를 따라가는 위·왼쪽 눈금자(선택 구간 강조).
 
 ## 2. 사용자 흐름과 기능 계약
 
@@ -78,6 +79,7 @@
 | [app/src/canvasRenderer.ts](app/src/canvasRenderer.ts), [canvasView.tsx](app/src/canvasView.tsx), [hitTest.ts](app/src/hitTest.ts), [largeDoc.ts](app/src/largeDoc.ts) | Canvas 2D 렌더러(보이는 영역만, 프레임 그림 보관, 작은 글자 막대 표시), 자동 전환 기준, 모양 기준 클릭 판정, 성능 측정용 큰 문서 |
 | [app/src/pluginApi.ts](app/src/pluginApi.ts), [pluginRuntime.ts](app/src/pluginRuntime.ts), [pluginPanels.tsx](app/src/pluginPanels.tsx), [app/plugins](app/plugins) | 플러그인 호출 검사·실행, 격리 iframe 문서, 플러그인 목록·권한·실행 창, 예제와 API 문서 |
 | [app/src/clipboard.ts](app/src/clipboard.ts), [align.ts](app/src/align.ts), [alignBar.tsx](app/src/alignBar.tsx), [svgExport.ts](app/src/svgExport.ts), [imageExport.ts](app/src/imageExport.ts) | 복사·붙여 넣기(새 id, 메인→인스턴스, 외부 입력 검사), 정렬·간격, 정렬·내보내기 버튼, SVG 쓰기, PNG·SVG 파일 만들기 |
+| [app/src/arrange.ts](app/src/arrange.ts), [rulers.tsx](app/src/rulers.tsx) | 레이어 순서 바꾸기, 눈금 간격·위치와 눈금자 |
 | [app/src/styleCss.ts](app/src/styleCss.ts) | 채우기·선·효과·텍스트 스타일을 CSS로 (캔버스와 React 출력 공용) |
 | [app/src/stylePanels.tsx](app/src/stylePanels.tsx) | 채우기·선·효과·텍스트 편집 패널 |
 | [app/src/assets.ts](app/src/assets.ts) | 이미지 바이트 IndexedDB 저장, 형식 판별, base64 |
