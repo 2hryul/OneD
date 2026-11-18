@@ -20,6 +20,11 @@
 - 실제 파일 파싱 기준: 전체 20,709노드/이미지 126개. 선택 노드의 원본 하위 103노드/인스턴스 27개. 현재 가져오기 결과는 227노드/펼친 인스턴스 45개/override 54개 적용·38개 미적용/도형 20개 근사.
 - 2026-11-18 방안 A 3단계 이후 가져오기 결과: 227노드, 펼친 인스턴스 45개, override 91개 적용·1개 미적용(`textData`, 경로에 맞는 노드 없음), 근사 도형 0개. 미적용이던 37개는 컴포넌트 루트를 가리키는 override였고, 근사 도형 20개는 `vectorData`(벡터 네트워크)로 복원했다.
 - 2026-11-18 방안 A 4단계: 가져온 Auto Layout 컨테이너를 레이아웃 엔진으로 다시 계산한 결과가 Figma가 파일에 저장한 위치·크기와 0.5px 안에서 모두 일치했다(Contents 103개 컨테이너·자식 186개, Mobile-Partners·Main·Switch 포함 자식 732개). 인스턴스 안쪽은 `derivedSymbolData`(Figma가 인스턴스 크기로 다시 계산해 저장한 값)를 적용해 맞췄다.
+- 2026-11-18 방안 A 5단계: 숨긴 노드까지 가져오도록 바꾼 뒤 Contents 가져오기는 409개 요소, 인스턴스 76개, override 105개 적용·0개 미적용, 보고 항목 0개다. 쓰인 컴포넌트 137개(variant 포함)를 Components 페이지에 메인으로 만들고 인스턴스 198개를 연결했으며, 채우기 스타일 39개를 색 토큰으로 만들었다. 메인 34개를 각각 고쳐도 Page 1의 도형은 움직이지 않았다.
+- 2026-11-18 방안 A 6단계: 펜 도구(P)로 벡터를 그리고, 벡터를 더블클릭(또는 Enter)해 점·핸들을 옮기고 넣고 지울 수 있다. 사각형·타원·가져온 벡터는 같은 모양의 경로로 바꿔 편집한다. 여러 요소를 합치기·빼기·교차·제외 불리언 그룹으로 묶으면 피연산자를 고칠 때마다 결과가 다시 계산되고, Ctrl+E로 경로 하나로 평탄화한다.
+- 2026-11-18 방안 A 7단계: 오른쪽 패널 프로토타입 탭에서 요소에 클릭·마우스 들어옴·마우스 나감·지연 트리거와 화면 이동·오버레이 열기/토글/닫기·뒤로·URL 열기 동작을 연결하고, ▶ 보기(Ctrl+Alt+Enter)로 실행한다. 보기 모드는 화면을 너비에 맞춰 그리고 길면 스크롤하며, '스크롤할 때 위치 고정' 자식은 제자리에 남는다(Figma에서 가져온 GNB 포함).
+- 2026-11-18 방안 A 8단계: 협업 서버(`npm run server`)에 계정을 만들고 문서를 공유 파일로 올리면, 같은 파일을 연 사람들의 변경이 서버가 정한 순서로 모두에게 적용된다. 참여자 얼굴·커서, 캔버스 위치 코멘트(답글·해결·삭제), 이름 붙인 버전 저장·복원이 있다.
+- 2026-11-18 방안 A 9단계: 보이는 도형이 3,000개를 넘으면 Canvas 렌더러(보이는 영역만 그림, 최상위 프레임 그림 보관)로 자동 전환한다(상태 표시줄에서 DOM·Canvas 고정 가능). 도형 20,400개 문서에서 화면 이동 한 프레임이 DOM 63ms → Canvas 16ms다. 플러그인은 격리된 iframe에서 `canvasStudio` API로 문서를 읽고 고친다([app/plugins/README.md](app/plugins/README.md)).
 
 ## 2. 사용자 흐름과 기능 계약
 
@@ -39,7 +44,7 @@
 
 ## 3. 데이터 모델
 
-현재 [model.ts](app/src/model.ts)의 `DesignDocument`는 `version: 4`, 이름, `pages[]`로 구성된다(2026-11-18 방안 A 1·3·4단계). 프레임은 `layout`(Flex: 방향·줄바꿈·간격·여백·정렬)을, 자식은 `item`(fix·fill·auto 크기, min·max, absolute)과 `constraints`(left·right·center·left-right·scale)를 가진다. 편집할 때마다 레이아웃이 다시 계산되고 같은 undo 단위에 들어간다. 노드 스타일은 `fills`(단색·선형·원형·이미지), `strokes`, `effects`, 텍스트 정렬·줄 높이·자간·구간 스타일(`spans`)이다. 이미지 바이트는 IndexedDB에 두고 문서에는 이미지 해시만 둔다. version 1·2 JSON은 읽을 때 변환한다. 페이지는 `objects`(id → 노드)와 최상위 순서 `children`을 갖고, 프레임 노드는 자식 순서 `children`을 갖는다. 노드는 `id`, `parentId`, 유형(`frame`, `rectangle`, `ellipse`, `text`, `vector`), 페이지 절대 좌표, 크기, 2×3 `transform`, 채우기와 유형별 속성을 가진다. 편집은 [changes.ts](app/src/changes.ts)의 변경 목록(`addObj`, `modObj`, `delObj`, `movObjects`, `setDocument`)과 역변경의 쌍으로 표현하고, undo 기록도 이 쌍을 저장한다. version 1 JSON은 읽을 때 version 2로 변환한다.
+현재 [model.ts](app/src/model.ts)의 `DesignDocument`는 `version: 5`, 이름, `pages[]`, `components`(메인 컴포넌트 등록), `tokens`(색·숫자 디자인 토큰)로 구성된다(2026-11-18 방안 A 1·3·4·5단계). 컴포넌트는 메인 루트(`componentId`·`mainInstance`)와 인스턴스(`componentId`, 하위 도형마다 `shapeRef`, 사용자가 바꾼 속성 묶음 `touched`)로 표현하고, 메인 변경은 touched가 아닌 묶음만 인스턴스에 동기화한다. variant는 세트 프레임(`componentSet`)과 컴포넌트별 속성 값으로 표현한다. 프레임은 `layout`(Flex: 방향·줄바꿈·간격·여백·정렬)을, 자식은 `item`(fix·fill·auto 크기, min·max, absolute)과 `constraints`(left·right·center·left-right·scale)를 가진다. 편집할 때마다 레이아웃이 다시 계산되고 같은 undo 단위에 들어간다. 노드 스타일은 `fills`(단색·선형·원형·이미지), `strokes`, `effects`, 텍스트 정렬·줄 높이·자간·구간 스타일(`spans`)이다. 이미지 바이트는 IndexedDB에 두고 문서에는 이미지 해시만 둔다. 벡터는 편집 경로 `path`(하위 경로마다 닫힘 여부와 점·베지어 핸들, 도형 지역 좌표)를 가질 수 있고, 가져온 벡터는 원래 경로 좌표계 `viewBox`를 둔다. 불리언 그룹은 `boolOp`(union·subtract·intersect·exclude)를 가진 그룹이며 결과 경로를 `path`에 계산해 둔다(짝홀 규칙 `fillRule: 'evenodd'`). 프로토타입은 노드의 `interactions`(트리거·지연·동작, 목적지는 같은 페이지의 최상위 프레임 id)와 `fixedScroll`로 표현하고, 컴포넌트 동기화 묶음 `prototype`에 든다. version 1·2 JSON은 읽을 때 변환한다. 페이지는 `objects`(id → 노드)와 최상위 순서 `children`을 갖고, 프레임 노드는 자식 순서 `children`을 갖는다. 노드는 `id`, `parentId`, 유형(`frame`, `rectangle`, `ellipse`, `text`, `vector`), 페이지 절대 좌표, 크기, 2×3 `transform`, 채우기와 유형별 속성을 가진다. 편집은 [changes.ts](app/src/changes.ts)의 변경 목록(`addObj`, `modObj`, `delObj`, `movObjects`, `setDocument`)과 역변경의 쌍으로 표현하고, undo 기록도 이 쌍을 저장한다. version 1 JSON은 읽을 때 version 2로 변환한다.
 
 다음 모델 확장에서는 아래 개념을 구분한다.
 
@@ -63,7 +68,14 @@
 | [app/src/panels.tsx](app/src/panels.tsx) | 페이지 목록, 레이어 트리(숨김·잠금·끌어서 순서 변경), 속성 패널 |
 | [app/src/changes.ts](app/src/changes.ts) | 변경·역변경 쌍, 이동·크기·회전·그룹·페이지 편집, 그룹 상자 보정, undo 기록 병합 |
 | [app/src/geometry.ts](app/src/geometry.ts), [selection.ts](app/src/selection.ts), [snapping.ts](app/src/snapping.ts) | 행렬·핸들 계산, 선택 대상·프레임 판정, 스냅 |
+| [app/src/components.ts](app/src/components.ts), [normalize.ts](app/src/normalize.ts), [componentPanels.tsx](app/src/componentPanels.tsx), [assetsPanel.tsx](app/src/assetsPanel.tsx) | 컴포넌트·인스턴스·variant·토큰 편집과 동기화, 편집 뒤 보정 순서, 컴포넌트·토큰 패널 |
 | [app/src/layout.ts](app/src/layout.ts), [layoutEdits.ts](app/src/layoutEdits.ts), [layoutPanels.tsx](app/src/layoutPanels.tsx), [figLayout.ts](app/src/figLayout.ts) | Flex 레이아웃 엔진과 제약, 편집 후 재배치·끌어 놓기 순서, 레이아웃 패널, Figma Auto Layout 변환 |
+| [app/src/path.ts](app/src/path.ts), [boolean.ts](app/src/boolean.ts), [pathTools.tsx](app/src/pathTools.tsx) | 경로 수학(SVG 변환·곡선 분할·상자), 불리언 연산(polygon-clipping), 펜·경로 편집 도우미와 오버레이, 불리언·경로 패널 |
+| [app/src/prototype.ts](app/src/prototype.ts), [viewer.tsx](app/src/viewer.tsx), [prototypePanels.tsx](app/src/prototypePanels.tsx) | 보기 모드 상태 전이(화면 이동·오버레이·뒤로)와 클릭 대상 찾기, 보기 모드 화면, 프로토타입 패널과 연결선 |
+| [app/server](app/server) | 협업 서버: 설정(.env)·로그(마스킹, 30일 보관)·계정(scrypt)·파일 방(변경 순서·검증·코멘트·버전)·HTTP API·WebSocket |
+| [app/src/collab.ts](app/src/collab.ts), [useCollab.ts](app/src/useCollab.ts), [collabPanels.tsx](app/src/collabPanels.tsx), [collabTypes.ts](app/src/collabTypes.ts) | 협업 클라이언트(확정 문서 + 대기 변경 다시 얹기, 재연결), 공유 대화상자·참여자·코멘트·커서 화면, 서버와 공유하는 메시지 타입 |
+| [app/src/canvasRenderer.ts](app/src/canvasRenderer.ts), [canvasView.tsx](app/src/canvasView.tsx), [hitTest.ts](app/src/hitTest.ts), [largeDoc.ts](app/src/largeDoc.ts) | Canvas 2D 렌더러(보이는 영역만, 프레임 그림 보관, 작은 글자 막대 표시), 자동 전환 기준, 모양 기준 클릭 판정, 성능 측정용 큰 문서 |
+| [app/src/pluginApi.ts](app/src/pluginApi.ts), [pluginRuntime.ts](app/src/pluginRuntime.ts), [pluginPanels.tsx](app/src/pluginPanels.tsx), [app/plugins](app/plugins) | 플러그인 호출 검사·실행, 격리 iframe 문서, 플러그인 목록·권한·실행 창, 예제와 API 문서 |
 | [app/src/styleCss.ts](app/src/styleCss.ts) | 채우기·선·효과·텍스트 스타일을 CSS로 (캔버스와 React 출력 공용) |
 | [app/src/stylePanels.tsx](app/src/stylePanels.tsx) | 채우기·선·효과·텍스트 편집 패널 |
 | [app/src/assets.ts](app/src/assets.ts) | 이미지 바이트 IndexedDB 저장, 형식 판별, base64 |
@@ -88,7 +100,7 @@
 
 ### 4.2 React 출력 규칙
 
-현재 [export.ts](app/src/export.ts)는 선택 노드의 하위 요소를 고정 크기·절대 좌표 TSX로 내보내고 텍스트를 선택적 props로 만든다. SVG 경로는 inline SVG로 출력한다. 이 출력은 **초안**이다. 완료 버전은 컴포넌트 이름·props를 안정적으로 생성하고, Auto Layout을 CSS flex/grid로, 이미지·글꼴을 에셋으로 분리하며, 독립 React 프로젝트에서 검증한다.
+현재 [export.ts](app/src/export.ts)는 선택 노드의 하위 요소를 고정 크기·절대 좌표 TSX로 내보내고 텍스트를 선택적 props로 만든다. SVG 경로는 inline SVG로 출력한다. 편집 경로 벡터와 불리언 그룹은 결과 경로 하나(`<path>`)로 내보내고 피연산자는 내보내지 않는다. 프로토타입 상호작용은 내보내지 않는다. 이 출력은 **초안**이다. 완료 버전은 컴포넌트 이름·props를 안정적으로 생성하고, Auto Layout을 CSS flex/grid로, 이미지·글꼴을 에셋으로 분리하며, 독립 React 프로젝트에서 검증한다.
 
 ## 5. 다음 마일스톤의 완료 기준
 
