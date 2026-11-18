@@ -1,6 +1,7 @@
-import { walkPage, type DesignNode, type Page } from './model';
+import { variantName, walkPage, type Component, type DesignDocument, type DesignNode, type Page } from './model';
 import { rotationDegrees } from './geometry';
-import { paintsToBackground, strokeAndEffectCss, textCss } from './styleCss';
+import { fontStack, pathPaint, paintsToBackground, strokeAndEffectCss, textCss } from './styleCss';
+import { pathToD } from './path';
 
 type Style = Record<string, string | number>;
 
@@ -66,45 +67,206 @@ function styleFor(node: DesignNode, parent: DesignNode | null): Style {
   if (node.type === 'text') {
     Object.assign(style, textCss(node), { display: 'flex', flexDirection: 'column', whiteSpace: 'pre-wrap' });
     style.fontSize = node.fontSize ?? 18;
-    if (node.fontFamily) style.fontFamily = node.fontFamily;
+    if (node.fontFamily) style.fontFamily = fontStack(node.fontFamily);
     if (node.fontWeight) style.fontWeight = node.fontWeight;
   }
   return style;
 }
 
-interface RenderContext { page: Page; props: Map<string, string>; hidden: ReadonlySet<string> }
+/** 출력할 컴포넌트 하나(variant 세트면 세트 전체)의 이름과 props 구성. */
+interface ComponentPlan {
+  name: string;
+  members: Component[];
+  /** 텍스트 레이어 이름 → prop 이름. variant끼리 같은 이름의 텍스트는 같은 prop을 쓴다. */
+  textProps: Map<string, string>;
+  variantProps: Array<{ key: string; prop: string; values: string[]; boolean: boolean }>;
+  code: string[];
+}
 
-/** 도형 하나를 JSX 줄로. 자식은 트리 그대로 안에 넣는다. */
+interface ExportState { doc: DesignDocument; plans: Map<string, ComponentPlan>; names: Set<string> }
+
+interface RenderContext {
+  state: ExportState;
+  page: Page;
+  hidden: ReadonlySet<string>;
+  /** 이 렌더 범위의 텍스트 prop 이름. 키는 도형 id. */
+  textProp: (node: DesignNode) => string | undefined;
+  /** 렌더를 시작한 루트 도형. 루트 안의 인스턴스만 컴포넌트 사용으로 바꾼다. */
+  rootId: string;
+}
+
+function hiddenIn(page: Page, rootId: string): Set<string> {
+  return new Set(walkPage(page, [rootId]).filter((node) => node.hidden && node.id !== rootId).flatMap((node) => walkPage(page, [node.id]).map((item) => item.id)));
+}
+
+function uniqueName(state: ExportState, base: string): string {
+  let name = base;
+  for (let index = 2; state.names.has(name); index++) name = `${base}${index}`;
+  state.names.add(name);
+  return name;
+}
+
+/** 도형 하나를 JSX 줄로. 다른 컴포넌트의 인스턴스는 그 컴포넌트를 쓰는 한 줄이 된다. */
 function renderNode(node: DesignNode, parent: DesignNode | null, depth: number, context: RenderContext): string[] {
   const indent = '  '.repeat(depth);
+  if (node.componentId && !node.mainInstance && node.id !== context.rootId) return [`${indent}${usage(context.state, context.page, node, parent)}`];
   const style = JSON.stringify(styleFor(node, parent));
-  const rootProps = parent ? '' : ' className={props.className}';
-  if (node.type === 'text') return [`${indent}<div${rootProps} style={${style}}>{props.${context.props.get(node.id)} ?? ${JSON.stringify(node.text ?? '')}}</div>`];
+  const styleAttr = parent ? `style={${style}}` : `className={props.className} style={{ ...${style}, ...props.style }}`;
+  if (node.type === 'text') {
+    const prop = context.textProp(node);
+    return [`${indent}<div ${styleAttr}>{${prop ? `props.${prop} ?? ` : ''}${JSON.stringify(node.text ?? '')}}</div>`];
+  }
+  // 편집 경로가 있는 벡터와 불리언 그룹은 결과 경로 하나로 내보낸다(불리언 피연산자는 내보내지 않는다).
+  if (node.path) {
+    const paint = pathPaint(node);
+    const attrs = `fill=${JSON.stringify(paint.fill)}${paint.fillRule ? ` fillRule="${paint.fillRule}"` : ''}${paint.stroke ? ` stroke=${JSON.stringify(paint.stroke)} strokeWidth={${paint.strokeWidth}}` : ''}`;
+    return [`${indent}<svg ${styleAttr} viewBox="0 0 ${round(node.width)} ${round(node.height)}" overflow="visible" aria-hidden="true"><path d=${JSON.stringify(pathToD(node.path))} ${attrs} /></svg>`];
+  }
   if (node.type === 'vector') {
     const paths = (node.vectorPaths ?? []).map((path) => `<path d=${JSON.stringify(path.d)} fill=${JSON.stringify(path.fill)}${path.fillRule ? ` fillRule="${path.fillRule}"` : ''}${path.stroke ? ` stroke=${JSON.stringify(path.stroke)} strokeWidth={${path.strokeWidth ?? 1}}` : ''} />`).join('');
-    return [`${indent}<svg${rootProps} style={${style}} viewBox="0 0 ${node.width} ${node.height}" aria-hidden="true">${paths}</svg>`];
+    const view = node.viewBox ?? { width: node.width, height: node.height };
+    return [`${indent}<svg ${styleAttr} viewBox="0 0 ${view.width} ${view.height}" preserveAspectRatio="none" aria-hidden="true">${paths}</svg>`];
   }
   const children = (node.children ?? []).map((id) => context.page.objects[id]).filter((child): child is DesignNode => Boolean(child && !context.hidden.has(child.id)));
-  if (children.length === 0) return [`${indent}<div${rootProps} style={${style}} />`];
-  return [`${indent}<div${rootProps} style={${style}}>`, ...children.flatMap((child) => renderNode(child, node, depth + 1, context)), `${indent}</div>`];
+  if (children.length === 0) return [`${indent}<div ${styleAttr} />`];
+  return [`${indent}<div ${styleAttr}>`, ...children.flatMap((child) => renderNode(child, node, depth + 1, context)), `${indent}</div>`];
+}
+
+const BOOLEAN_VALUES = new Set(['true', 'false']);
+
+/**
+ * 컴포넌트(또는 그 variant 세트)를 함수 컴포넌트 코드로 만든다. 한 번 만든 것은 다시 쓴다.
+ * variant 속성은 값의 유니온 타입 prop이 되고, 값이 true·false뿐이면 boolean prop이 된다. 텍스트 레이어는 이름별 문자열 prop이 된다.
+ */
+function ensurePlan(state: ExportState, componentId: string): ComponentPlan | null {
+  const component = state.doc.components[componentId];
+  if (!component) return null;
+  const key = component.setId ?? component.id;
+  const existing = state.plans.get(key);
+  if (existing) return existing;
+  const members = component.setId ? Object.values(state.doc.components).filter((item) => item.setId === component.setId) : [component];
+  const plan: ComponentPlan = { name: uniqueName(state, identifier(component.name)), members, textProps: new Map(), variantProps: [], code: [] };
+  state.plans.set(key, plan);
+  const taken = new Set(['style', 'className']);
+  const propName = (label: string): string => {
+    const base = identifier(label);
+    let name = `${base[0]!.toLowerCase()}${base.slice(1)}`;
+    for (let index = 2; taken.has(name); index++) name = `${base[0]!.toLowerCase()}${base.slice(1)}${index}`;
+    taken.add(name);
+    return name;
+  };
+  const keys = [...new Set(members.flatMap((member) => Object.keys(member.variant ?? {})))];
+  plan.variantProps = keys.map((variantKey) => {
+    const values = [...new Set(members.map((member) => member.variant?.[variantKey] ?? ''))];
+    return { key: variantKey, prop: propName(variantKey), values, boolean: values.every((value) => BOOLEAN_VALUES.has(value.toLowerCase())) };
+  });
+  for (const member of members) {
+    const main = mainOf(state.doc, member);
+    if (!main) continue;
+    for (const node of walkPage(main.page, [main.node.id])) {
+      if (node.type === 'text' && !insideNestedInstance(main.page, node, main.node.id) && !plan.textProps.has(node.name)) plan.textProps.set(node.name, propName(node.name));
+    }
+  }
+  plan.code = componentCode(state, plan);
+  return plan;
+}
+
+function mainOf(doc: DesignDocument, component: Component): { page: Page; node: DesignNode } | null {
+  const page = doc.pages.find((item) => item.id === component.pageId);
+  const node = page?.objects[component.mainId];
+  return page && node ? { page, node } : null;
+}
+
+function insideNestedInstance(page: Page, node: DesignNode, rootId: string): boolean {
+  for (let current = node.parentId; current && current !== rootId; current = page.objects[current]?.parentId ?? null) if (page.objects[current]?.componentId) return true;
+  return false;
+}
+
+function componentCode(state: ExportState, plan: ComponentPlan): string[] {
+  const props = [
+    '  className?: string;',
+    '  style?: CSSProperties;',
+    ...plan.variantProps.map((item) => `  ${item.prop}?: ${item.boolean ? 'boolean' : item.values.map((value) => JSON.stringify(value)).join(' | ')};`),
+    ...[...plan.textProps.values()].map((prop) => `  ${prop}?: string;`)
+  ];
+  const lines = [`export interface ${plan.name}Props {`, ...props, '}', ''];
+  // 이름에서 기호를 빼면 variant끼리 같아질 수 있다(예: 'Date range'와 'date-range'). 함수 이름은 파일 안에서 겹치지 않게 만든다.
+  const renderers = plan.members.map((member) => ({ member, fn: plan.members.length > 1 ? uniqueName(state, `${plan.name}__${identifier(variantName(member.variant ?? {}) || member.id)}`) : plan.name }));
+  if (plan.members.length > 1) {
+    const first = plan.members[0]!;
+    const condition = (member: Component): string => plan.variantProps.map((item) => {
+      const value = member.variant?.[item.key] ?? '';
+      const fallback = first.variant?.[item.key] ?? '';
+      return item.boolean ? `(props.${item.prop} ?? ${fallback.toLowerCase() === 'true'}) === ${value.toLowerCase() === 'true'}` : `(props.${item.prop} ?? ${JSON.stringify(fallback)}) === ${JSON.stringify(value)}`;
+    }).join(' && ') || 'true';
+    lines.push(`export function ${plan.name}(props: ${plan.name}Props) {`, ...renderers.slice(1).map(({ member, fn }) => `  if (${condition(member)}) return <${fn} {...props} />;`), `  return <${renderers[0]!.fn} {...props} />;`, '}', '');
+  }
+  for (const { member, fn } of renderers) {
+    const main = mainOf(state.doc, member);
+    if (!main) continue;
+    const context: RenderContext = { state, page: main.page, hidden: hiddenIn(main.page, main.node.id), rootId: main.node.id, textProp: (node) => (insideNestedInstance(main.page, node, main.node.id) ? undefined : plan.textProps.get(node.name)) };
+    const body = renderNode(main.node, null, 2, context);
+    lines.push(`${plan.members.length > 1 ? '' : 'export '}function ${fn}(props: ${plan.name}Props) {`, '  return (', ...body, '  );', '}', '');
+  }
+  return lines;
+}
+
+/** 인스턴스를 컴포넌트 사용 한 줄로. variant 값과, 메인과 다른 텍스트만 props로 넘긴다. 위치는 style prop으로 준다. */
+function usage(state: ExportState, page: Page, node: DesignNode, parent: DesignNode | null): string {
+  const component = node.componentId ? state.doc.components[node.componentId] : undefined;
+  const plan = node.componentId ? ensurePlan(state, node.componentId) : null;
+  if (!component || !plan) return `{/* 컴포넌트 ${node.componentId ?? ''} 없음 */}`;
+  const attrs = [`style={${JSON.stringify(placement(node, parent))}}`];
+  for (const item of plan.variantProps) {
+    const value = component.variant?.[item.key];
+    if (value !== undefined) attrs.push(item.boolean ? `${item.prop}={${value.toLowerCase() === 'true'}}` : `${item.prop}=${JSON.stringify(value)}`);
+  }
+  for (const text of walkPage(page, [node.id])) {
+    if (text.type !== 'text' || insideNestedInstance(page, text, node.id)) continue;
+    const main = text.shapeRef ? findMainShape(state.doc, text.shapeRef) : undefined;
+    const prop = plan.textProps.get(main?.name ?? text.name);
+    if (prop && main && text.text !== main.text) attrs.push(`${prop}=${JSON.stringify(text.text ?? '')}`);
+  }
+  return `<${plan.name} ${attrs.join(' ')} />`;
+}
+
+function findMainShape(doc: DesignDocument, id: string): DesignNode | undefined {
+  for (const page of doc.pages) if (page.objects[id]) return page.objects[id];
+  return undefined;
 }
 
 /**
- * 선택한 도형과 하위 트리를 React/TypeScript 컴포넌트 코드로 만든다.
- * 텍스트는 선택적 문자열 prop이 되고, 오토 레이아웃 프레임은 CSS flex로, 나머지는 부모 기준 절대 좌표로 나온다. 숨긴 도형은 빠진다.
+ * 선택한 도형과 하위 트리를 React/TypeScript 코드로 만든다.
+ * 오토 레이아웃 프레임은 CSS flex로, 나머지는 부모 기준 절대 좌표로 나온다. 숨긴 도형은 빠진다.
+ * 안에 든 인스턴스는 그 컴포넌트를 쓰는 JSX가 되고, 쓰인 컴포넌트는 같은 파일에 함수로 함께 나온다(S5-06).
+ * 선택한 것이 메인 컴포넌트나 그 인스턴스면 그 컴포넌트 자체를 내보낸다.
  */
-export function exportTsx(page: Page, selectedId: string): { name: string; code: string } {
-  const root = page.objects[selectedId];
-  if (!root) throw new Error('Select a node to export');
-  const hidden = new Set(walkPage(page, [selectedId]).filter((node) => node.hidden && node.id !== selectedId).flatMap((node) => walkPage(page, [node.id]).map((item) => item.id)));
-  const textNodes = walkPage(page, [selectedId]).filter((node) => node.type === 'text' && !hidden.has(node.id));
-  const props = new Map(textNodes.map((node, index) => [node.id, propertyName(node, index)]));
-  const name = identifier(root.name);
-  const propLines = textNodes.map((node) => `  ${props.get(node.id)}?: string;`).join('\n');
-  const body = renderNode(root, null, 2, { page, props, hidden }).join('\n');
-  const code = `export interface ${name}Props {\n  className?: string;\n${propLines ? `${propLines}\n` : ''}}\n\n` +
-    `export function ${name}(props: ${name}Props) {\n  return (\n${body}\n  );\n}\n`;
-  return { name, code };
+export function exportTsx(doc: DesignDocument, pageId: string, selectedId: string): { name: string; code: string } {
+  const page = doc.pages.find((item) => item.id === pageId);
+  const root = page?.objects[selectedId];
+  if (!page || !root) throw new Error('Select a node to export');
+  const state: ExportState = { doc, plans: new Map(), names: new Set() };
+  const componentId = root.componentId ?? (root.componentSet ? Object.values(doc.components).find((item) => item.setId === root.id)?.id : undefined);
+  if (componentId && (root.mainInstance || root.componentSet)) {
+    const plan = ensurePlan(state, componentId);
+    if (plan) return { name: plan.name, code: fileCode(state) };
+  }
+  const name = uniqueName(state, identifier(root.name));
+  const hidden = hiddenIn(page, selectedId);
+  const texts = walkPage(page, [selectedId]).filter((node) => node.type === 'text' && !hidden.has(node.id) && !(node.id !== selectedId && insideInstanceBelow(page, node, selectedId)));
+  const props = new Map(texts.map((node, index) => [node.id, propertyName(node, index)]));
+  const body = renderNode(root, null, 2, { state, page, hidden, rootId: selectedId, textProp: (node) => props.get(node.id) });
+  const own = [`export interface ${name}Props {`, '  className?: string;', '  style?: CSSProperties;', ...texts.map((node) => `  ${props.get(node.id)}?: string;`), '}', '', `export function ${name}(props: ${name}Props) {`, '  return (', ...body, '  );', '}', ''];
+  return { name, code: fileCode(state, own) };
+}
+
+function insideInstanceBelow(page: Page, node: DesignNode, rootId: string): boolean {
+  for (let current: string | null = node.id; current && current !== rootId; current = page.objects[current]?.parentId ?? null) if (page.objects[current]?.componentId && !page.objects[current]?.mainInstance) return true;
+  return false;
+}
+
+function fileCode(state: ExportState, own: string[] = []): string {
+  return ["import type { CSSProperties } from 'react';", '', ...own, ...[...state.plans.values()].flatMap((plan) => plan.code)].join('\n');
 }
 
 function round(value: number): number {

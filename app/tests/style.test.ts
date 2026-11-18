@@ -16,7 +16,7 @@ describe('document version 3', () => {
     v2.version = 2;
     for (const node of Object.values(v2.pages[0]!.objects)) { node.fill = node.id === 'rect-1' ? 'transparent' : '#123456'; delete node.fills; }
     const doc = parseDocument(JSON.stringify(v2));
-    expect(doc.version).toBe(4);
+    expect(doc.version).toBe(5);
     expect(doc.pages[0]!.objects['rect-1']!.fills).toEqual([]);
     expect(doc.pages[0]!.objects['frame-1']!.fills).toEqual(solid('#123456'));
   });

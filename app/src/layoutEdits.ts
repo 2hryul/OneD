@@ -1,6 +1,6 @@
 import { walkPage, type DesignDocument, type DesignNode, type Matrix, type Page } from './model.ts';
 import { applyPoint, boundsOf, center, invert, linearPart, multiply, roundRect, worldCorners, worldMatrix, type Point } from './geometry.ts';
-import { applyChanges, composeTransactions, EMPTY_TRANSACTION, moveShapes, normalizeGroups, resizeShape, updateShape, type Transaction } from './changes.ts';
+import { applyChanges, composeTransactions, EMPTY_TRANSACTION, moveShapes, resizeShape, updateShape, type Transaction } from './changes.ts';
 import { computeFlex, type Box } from './layout.ts';
 
 const MAX_PASSES = 8;
@@ -37,6 +37,8 @@ export function layoutContainer(doc: DesignDocument, pageId: string, id: string)
   const world = worldMatrix(node);
   const toLocal = invert(world);
   const children = flowChildren(page, node).map((child) => localChild(child, toLocal, linearPart(node.transform)));
+  // 보이는 자식이 없으면 Figma는 내용에 맞춤이어도 마지막 크기를 유지한다.
+  if (children.length === 0) return EMPTY_TRANSACTION;
   const result = computeFlex({ width: node.width, height: node.height, layout: node.layout, item: node.item }, children.map(({ node: child, bounds, rotated }) => ({
     id: child.id, width: bounds.width, height: bounds.height, item: rotated ? { ...child.item, h: 'fix', v: 'fix' } : child.item
   })));
@@ -62,7 +64,7 @@ function placeChild(doc: DesignDocument, pageId: string, child: LocalChild, pare
 const round = (value: number): number => Math.round(value * 100) / 100;
 
 /** 편집이 건드린 도형 id를 페이지별로 모은다. 지워지거나 옮겨진 도형은 원래 부모도 포함한다. */
-function touchedIds(before: DesignDocument, tx: Transaction): Map<string, Set<string>> {
+export function touchedIds(before: DesignDocument, tx: Transaction): Map<string, Set<string>> {
   const result = new Map<string, Set<string>>();
   const add = (pageId: string, id: string | null | undefined): void => {
     if (!id) return;
@@ -95,18 +97,7 @@ function affectedContainers(page: Page, ids: Iterable<string>): string[] {
   return [...found].sort((a, b) => depth(b) - depth(a));
 }
 
-/**
- * 편집 뒤 레이아웃을 다시 계산해 같은 Transaction에 붙인다. 그 다음 그룹 상자를 맞춘다.
- * 안쪽 컨테이너가 hug로 커지면 바깥 컨테이너가 다시 배치되고, 바깥에서 fill로 크기가 바뀐 안쪽 컨테이너도 다시 배치돼야 하므로
- * 바뀐 것이 없을 때까지 몇 번 반복한다.
- */
-export function normalizeAfterEdit(before: DesignDocument, tx: Transaction): Transaction {
-  if (tx.redo.length === 0 || tx.redo.some((change) => change.type === 'setDocument')) return tx;
-  const withLayout = composeTransactions(before, [() => tx, (current) => relayoutTouched(current, touchedIds(before, tx))]);
-  return normalizeGroups(before, withLayout);
-}
-
-function relayoutTouched(doc: DesignDocument, touched: Map<string, Set<string>>): Transaction {
+export function relayoutTouched(doc: DesignDocument, touched: Map<string, Set<string>>): Transaction {
   const steps = [...touched].map(([pageId, ids]) => (current: DesignDocument) => relayoutPage(current, pageId, ids));
   return composeTransactions(doc, steps);
 }

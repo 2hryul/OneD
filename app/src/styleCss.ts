@@ -55,7 +55,8 @@ export function strokeAndEffectCss(node: DesignNode): CssStyle {
   const style: CssStyle = {};
   const shadows: string[] = [];
   const filters: string[] = [];
-  const strokes = node.type === 'vector' || node.type === 'text' ? [] : node.strokes ?? [];
+  // 벡터·불리언의 선은 상자가 아니라 경로에 그린다(pathPaint).
+  const strokes = node.type === 'vector' || node.type === 'text' || node.boolOp ? [] : node.strokes ?? [];
   const top = strokes[strokes.length - 1];
   if (top) {
     style.outline = `${top.width}px ${top.dash?.length ? 'dashed' : 'solid'} ${top.color}`;
@@ -83,6 +84,17 @@ export function strokeAndEffectCss(node: DesignNode): CssStyle {
   return style;
 }
 
+/** 편집기 기본 글꼴 목록. */
+export const DEFAULT_FONT_STACK = "'DM Sans', Inter, 'Segoe UI', sans-serif";
+
+/**
+ * 글꼴 목록. 문서의 글꼴이 이 PC에 없을 때 DOM·Canvas·내보낸 코드가 모두 같은 대체 글꼴을 쓰도록 기본 목록을 뒤에 붙인다.
+ * (없으면 브라우저 기본 글꼴로 떨어져 렌더러마다 글자 폭이 달라진다.)
+ */
+export function fontStack(family?: string): string {
+  return family ? `'${family.replace(/['\\]/g, '')}', ${DEFAULT_FONT_STACK}` : DEFAULT_FONT_STACK;
+}
+
 /** 텍스트 도형의 글자 스타일. 세로 정렬은 텍스트 요소를 세로 flex로 두고 justify-content로 맞춘다. */
 export function textCss(node: DesignNode): CssStyle {
   const style: CssStyle = { color: primaryColor(node, '#17223a') };
@@ -108,6 +120,17 @@ export function textRuns(node: Pick<DesignNode, 'text' | 'spans'>): Array<{ text
   }
   if (cursor < text.length) runs.push({ text: text.slice(cursor) });
   return runs;
+}
+
+/**
+ * 편집 경로(벡터·불리언)를 그릴 SVG 채우기·선 속성. 그라디언트·이미지는 대표 색으로 근사한다.
+ * 캔버스와 코드 내보내기가 같은 값을 쓰도록 한곳에 둔다.
+ */
+export function pathPaint(node: DesignNode): { fill: string; stroke?: string; strokeWidth?: number; fillRule?: 'evenodd' } {
+  const top = node.fills[node.fills.length - 1];
+  const fill = top ? withAlpha(primaryColor(node), top.opacity ?? 1) : 'none';
+  const stroke = node.strokes?.[node.strokes.length - 1];
+  return { fill, ...(stroke ? { stroke: stroke.color, strokeWidth: stroke.width } : {}), ...(node.fillRule ? { fillRule: node.fillRule } : {}) };
 }
 
 /** #rrggbb(aa) 색에 투명도를 곱한다. 다른 형식은 그대로 둔다. */

@@ -7,3 +7,4 @@ craft-project/
 *.deck
 *.jam
 *.tsbuildinfo
+.env

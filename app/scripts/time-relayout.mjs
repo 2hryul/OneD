@@ -5,7 +5,7 @@ import { performance } from 'node:perf_hooks';
 import { parseFig } from 'openfig-core';
 import { importFigNode } from '../src/figmaImport.ts';
 import { updateShape } from '../src/changes.ts';
-import { normalizeAfterEdit } from '../src/layoutEdits.ts';
+import { normalizeAfterEdit } from '../src/normalize.ts';
 
 const [filePath, rootId, runsArg] = process.argv.slice(2);
 const runs = Number(runsArg ?? 30);

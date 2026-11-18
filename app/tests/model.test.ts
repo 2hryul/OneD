@@ -30,7 +30,7 @@ describe('document model v2', () => {
       { id: 'c', type: 'ellipse', name: 'C', parentId: null, x: 200, y: 0, width: 30, height: 30, fill: '#00ff00' }
     ] };
     const doc = parseDocument(JSON.stringify(v1));
-    expect(doc.version).toBe(4);
+    expect(doc.version).toBe(5);
     expect(doc.name).toBe('Old file');
     expect(node(doc, 'b').fills).toEqual([{ type: 'solid', color: '#ff0000' }]);
     expect(page(doc).children).toEqual(['f', 'c']);
@@ -146,7 +146,7 @@ describe('history', () => {
 
 describe('React export', () => {
   it('exposes text as props and uses relative coordinates', () => {
-    const result = exportTsx(page(sampleDocument()), 'frame-1');
+    const result = exportTsx(sampleDocument(), PAGE, 'frame-1');
     expect(result.code).toContain('export function LandingPage');
     expect(result.code).toContain('heading0?: string');
     expect(result.code).toContain('props.heading0');
@@ -158,7 +158,7 @@ describe('React export', () => {
     const base = sampleDocument();
     const doc = applyChanges(base, addShape(base, PAGE, { id: 'vector-1', parentId: null, type: 'vector', name: 'Icon', x: 0, y: 0,
       width: 10, height: 10, fills: [], vectorPaths: [{ d: 'M0 0 L10 10', fill: 'none', stroke: '#123456', strokeWidth: 2 }] }).redo);
-    const code = exportTsx(page(doc), 'vector-1').code;
+    const code = exportTsx(doc, PAGE, 'vector-1').code;
     expect(code).toContain('<svg');
     expect(code).toContain('M0 0 L10 10');
     expect(() => transformSync(code, { loader: 'tsx', jsx: 'automatic' })).not.toThrow();

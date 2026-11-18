@@ -7,17 +7,21 @@
     "dev": "vite --host 127.0.0.1",
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b",
-    "test": "vitest run"
+    "test": "vitest run",
+    "server": "node --experimental-strip-types server/main.ts"
   },
   "dependencies": {
     "openfig-core": "^0.4.1",
+    "polygon-clipping": "0.15.7",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "ws": "8.22.1"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",
+    "@types/ws": "8.18.1",
     "@vitejs/plugin-react": "^5.2.0",
     "typescript": "^5.7.2",
     "vite": "^7.3.6",

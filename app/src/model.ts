@@ -27,6 +27,26 @@ export type Effect =
   | { type: 'drop-shadow' | 'inner-shadow'; x: number; y: number; blur: number; spread: number; color: string }
   | { type: 'layer-blur' | 'background-blur'; radius: number };
 
+/** 경로의 점 하나. in·out은 들어오고 나가는 베지어 핸들의 위치(같은 지역 좌표)이고, 없으면 그쪽은 직선이다. */
+export interface PathPoint { x: number; y: number; in?: { x: number; y: number }; out?: { x: number; y: number } }
+export interface SubPath { closed: boolean; points: PathPoint[] }
+export type BoolOp = 'union' | 'subtract' | 'intersect' | 'exclude';
+
+/** 프로토타입 상호작용(Penpot types/shape/interactions.cljc). 트리거가 일어나면 동작을 보기 모드에서 실행한다. */
+export type InteractionTrigger = 'click' | 'mouse-enter' | 'mouse-leave' | 'after-delay';
+export type OverlayPosition = 'center' | 'top-left' | 'top-center' | 'top-right' | 'bottom-left' | 'bottom-center' | 'bottom-right';
+/** 동작. destination은 같은 페이지의 최상위 프레임(화면) id다. */
+export type InteractionAction =
+  | { type: 'navigate'; destination: string }
+  | { type: 'open-overlay' | 'toggle-overlay'; destination: string; position: OverlayPosition; closeOnOutside: boolean; background: boolean }
+  | { type: 'close-overlay'; destination?: string }
+  | { type: 'back' }
+  | { type: 'open-url'; url: string };
+/** delay는 after-delay 트리거의 대기 시간(ms)이다. */
+export interface Interaction { trigger: InteractionTrigger; delay?: number; action: InteractionAction }
+export const TRIGGERS: readonly InteractionTrigger[] = ['click', 'mouse-enter', 'mouse-leave', 'after-delay'];
+export const OVERLAY_POSITIONS: readonly OverlayPosition[] = ['center', 'top-left', 'top-center', 'top-right', 'bottom-left', 'bottom-center', 'bottom-right'];
+
 export type TextAlign = 'left' | 'center' | 'right' | 'justify';
 export type VerticalAlign = 'top' | 'middle' | 'bottom';
 
@@ -70,11 +90,35 @@ export interface DesignNode {
   /** 레이아웃이 없는 프레임의 크기가 바뀔 때 이 자식이 따라가는 방식. 없으면 left·top. */
   constraints?: Constraints;
   vectorPaths?: Array<{ d: string; fill: string; stroke?: string; strokeWidth?: number; fillRule?: 'evenodd' }>;
+  /** vectorPaths 좌표계의 크기. 도형 크기가 바뀌어도 경로가 같이 늘어나도록 SVG viewBox로 쓴다. 없으면 도형 크기. */
+  viewBox?: { width: number; height: number };
+  /** 편집 경로의 채우기 규칙. 불리언 결과처럼 구멍이 있는 경로는 evenodd다. */
+  fillRule?: 'evenodd';
+  /** 편집할 수 있는 벡터 경로(도형 지역 좌표). 있으면 vectorPaths 대신 이 경로를 도형의 채우기·선으로 그린다. */
+  path?: SubPath[];
+  /** group에만 있다. 있으면 자식(피연산자)을 이 연산으로 합친 결과 경로(path)를 그린다(비파괴 불리언). */
+  boolOp?: BoolOp;
   /** frame에서 false면 내용을 자르지 않는다(Figma의 Clip content 끔). 기본은 자른다. */
   clipContent?: boolean;
   hidden?: boolean;
   /** 캔버스에서 선택·이동되지 않는다. 레이어 패널에서는 선택할 수 있다. */
   locked?: boolean;
+  /** 컴포넌트 루트에만 있다. 메인 컴포넌트와 그 인스턴스의 루트가 같은 값을 가진다. */
+  componentId?: string;
+  /** 메인 컴포넌트의 루트. 이 하위 트리가 인스턴스들의 원본이다. */
+  mainInstance?: boolean;
+  /** variant 메인들을 묶는 프레임(Figma 컴포넌트 세트, Penpot variant 컨테이너). */
+  componentSet?: boolean;
+  /** 인스턴스 안의 도형이 대응하는 메인 컴포넌트 도형 id. 인스턴스 루트에도 있다. */
+  shapeRef?: string;
+  /** 인스턴스에서 사용자가 바꾼 속성 묶음. 여기 든 묶음은 메인이 바뀌어도 덮어쓰지 않는다(Penpot touched). */
+  touched?: SyncGroup[];
+  /** 속성에 연결된 디자인 토큰 id. 토큰 값이 바뀌면 이 속성도 바뀐다. */
+  tokens?: Partial<Record<TokenSlot, string>>;
+  /** 프로토타입 상호작용. 보기 모드에서만 동작한다. */
+  interactions?: Interaction[];
+  /** 화면(최상위 프레임)의 바로 아래 자식에서 true면 화면을 스크롤해도 제자리에 남는다(Figma Fix position when scrolling). */
+  fixedScroll?: boolean;
 }
 
 /** 변경 명령으로 바꿀 수 있는 속성. 정체성(id, type)과 계층(parentId, children)은 별도 변경으로만 바꾼다. */
@@ -88,7 +132,68 @@ export interface Page {
   objects: Record<string, DesignNode>;
 }
 
-export interface DesignDocument { version: 4; name: string; pages: Page[] }
+export interface DesignDocument {
+  version: 5;
+  name: string;
+  pages: Page[];
+  components: Record<string, Component>;
+  tokens: Record<string, Token>;
+}
+
+/** 메인 컴포넌트 등록 정보. variant면 세트 프레임 id와 속성 값(예: { State: 'Hover' })을 가진다. */
+export interface Component {
+  id: string;
+  name: string;
+  mainId: string;
+  pageId: string;
+  setId?: string;
+  variant?: Record<string, string>;
+}
+
+export type TokenType = 'color' | 'number';
+export interface Token { id: string; name: string; type: TokenType; value: string | number }
+
+/** 토큰을 연결할 수 있는 속성 자리. fill은 첫 단색 채우기(텍스트면 글자색), stroke는 첫 선 색, gap은 오토 레이아웃 간격이다. */
+export type TokenSlot = 'fill' | 'stroke' | 'radius' | 'fontSize' | 'gap';
+export const TOKEN_SLOT_TYPE: Record<TokenSlot, TokenType> = { fill: 'color', stroke: 'color', radius: 'number', fontSize: 'number', gap: 'number' };
+
+/**
+ * 메인→인스턴스 동기화 단위. Penpot component.cljc의 sync-attrs 묶음을 이 모델 속성에 맞춘 것이다.
+ * geometry(x·y·크기·행렬)는 인스턴스 루트 기준 상대 위치로 비교·동기화한다.
+ */
+export const SYNC_GROUPS = {
+  name: ['name'],
+  fill: ['fills'],
+  content: ['text', 'spans', 'vectorPaths', 'viewBox', 'fillRule', 'path', 'boolOp'],
+  visibility: ['hidden'],
+  modifiable: ['locked'],
+  'text-font': ['fontSize', 'fontFamily', 'fontWeight'],
+  'text-display': ['letterSpacing', 'lineHeight', 'textAlign', 'verticalAlign'],
+  stroke: ['strokes'],
+  radius: ['radius'],
+  'layer-effects': ['opacity'],
+  effects: ['effects'],
+  constraints: ['constraints'],
+  layout: ['layout'],
+  'layout-item': ['item'],
+  clip: ['clipContent'],
+  tokens: ['tokens'],
+  prototype: ['interactions', 'fixedScroll'],
+  geometry: ['x', 'y', 'width', 'height', 'transform']
+} as const satisfies Record<string, readonly string[]>;
+export type SyncGroup = keyof typeof SYNC_GROUPS;
+const SYNC_GROUP_NAMES = Object.keys(SYNC_GROUPS) as SyncGroup[];
+
+/** variant 메인 이름 "State=Hover, Size=L"을 속성 표로. 형식이 아니면 null. */
+export function parseVariantName(name: string): Record<string, string> | null {
+  const parts = name.split(',').map((part) => part.trim()).filter(Boolean);
+  if (parts.length === 0 || parts.some((part) => !part.includes('='))) return null;
+  return Object.fromEntries(parts.map((part) => { const [key, ...rest] = part.split('='); return [key!.trim(), rest.join('=').trim()]; }));
+}
+
+export function variantName(variant: Record<string, string>): string {
+  return Object.entries(variant).map(([key, value]) => `${key}=${value}`).join(', ');
+}
 
 export type FlexDirection = 'row' | 'column';
 export type FlexJustify = 'start' | 'center' | 'end' | 'space-between';
@@ -192,7 +297,7 @@ export function walkPage(page: Page, roots: readonly string[] = page.children): 
 }
 
 export function sampleDocument(): DesignDocument {
-  return { version: 4, name: 'Untitled design', pages: [pageFromNodes('page-1', 'Page 1', [
+  return { version: 5, name: 'Untitled design', components: {}, tokens: {}, pages: [pageFromNodes('page-1', 'Page 1', [
     { id: 'frame-1', type: 'frame', name: 'Landing page', parentId: null, x: 120, y: 95, width: 720, height: 520, fills: solid('#ffffff') },
     { id: 'rect-1', type: 'rectangle', name: 'Hero panel', parentId: 'frame-1', x: 164, y: 150, width: 632, height: 336, fills: solid('#e6ebff'), radius: 24 },
     { id: 'text-1', type: 'text', name: 'Heading', parentId: 'frame-1', x: 210, y: 218, width: 470, height: 72, fills: solid('#202c65'), text: 'Design starts here', fontSize: 42 },
@@ -210,7 +315,8 @@ export function parseDocument(raw: string): DesignDocument {
   const value: unknown = JSON.parse(raw);
   if (!isRecord(value) || typeof value.name !== 'string') throw new Error('Invalid document');
   if (value.version === 1) return migrateV1(value.name, value.nodes);
-  if (value.version === 2 || value.version === 3 || value.version === 4) return validatePages(value.name, value.pages, value.version);
+  if (value.version === 2 || value.version === 3 || value.version === 4) return { ...validatePages(value.name, value.pages, value.version), components: {}, tokens: {} };
+  if (value.version === 5) return validateRegistries({ ...validatePages(value.name, value.pages, 5), components: value.components as DesignDocument['components'], tokens: value.tokens as DesignDocument['tokens'] });
   throw new Error('Unsupported document format');
 }
 
@@ -239,11 +345,11 @@ function migrateV1(name: string, nodes: unknown): DesignDocument {
     void _children;
     return dropLegacyLayout(fillToFills(rest)) as unknown as NodeInput;
   });
-  try { return { version: 4, name, pages: [pageFromNodes('page-1', 'Page 1', inputs)] }; }
+  try { return { version: 5, name, components: {}, tokens: {}, pages: [pageFromNodes('page-1', 'Page 1', inputs)] }; }
   catch { throw new Error('Invalid parent'); }
 }
 
-function validatePages(name: string, pages: unknown, version: 2 | 3 | 4): DesignDocument {
+function validatePages(name: string, pages: unknown, version: 2 | 3 | 4 | 5): Omit<DesignDocument, 'components' | 'tokens'> & { version: 5 } {
   if (!Array.isArray(pages) || pages.length === 0) throw new Error('Unsupported document format');
   const pageIds = new Set<string>();
   const result: Page[] = [];
@@ -251,7 +357,7 @@ function validatePages(name: string, pages: unknown, version: 2 | 3 | 4): Design
     if (!isRecord(page) || typeof page.id !== 'string' || pageIds.has(page.id) || typeof page.name !== 'string' ||
       !isStringArray(page.children) || !isRecord(page.objects)) throw new Error('Invalid page');
     pageIds.add(page.id);
-    const objects = version === 4 ? page.objects : Object.fromEntries(Object.entries(page.objects).map(([key, node]) => {
+    const objects = version >= 4 ? page.objects : Object.fromEntries(Object.entries(page.objects).map(([key, node]) => {
       checkNodeFields(node, version);
       return [key, dropLegacyLayout(version === 2 ? fillToFills(node) : node)];
     }));
@@ -259,14 +365,14 @@ function validatePages(name: string, pages: unknown, version: 2 | 3 | 4): Design
     checkPageTree(next);
     result.push(next);
   }
-  return { version: 4, name, pages: result };
+  return { version: 5, name, pages: result };
 }
 
 /** 모든 도형이 정확히 한 곳(최상위 목록 또는 부모의 children)에서 참조되고, 최상위에서 모두 닿을 수 있는지 검사한다. 순환 참조도 여기서 걸러진다. */
 function checkPageTree(page: Page): void {
   const entries = Object.entries(page.objects);
   for (const [key, node] of entries) {
-    checkNodeFields(node, 4);
+    checkNodeFields(node, 5);
     if (node.id !== key || !isMatrix(node.transform)) throw new Error('Invalid node');
     if (isContainer(node as DesignNode) !== isStringArray(node.children)) throw new Error('Invalid node');
   }
@@ -281,7 +387,13 @@ function checkPageTree(page: Page): void {
   if (referenced.size !== entries.length || walkPage(page).length !== entries.length) throw new Error('Invalid parent');
 }
 
-function checkNodeFields(node: unknown, version: 1 | 2 | 3 | 4): asserts node is Record<string, unknown> {
+/** 노드 하나가 저장 형식(version 5)에 맞는지 검사한다. 플러그인처럼 밖에서 온 노드 값을 받을 때 쓴다. 어긋나면 던진다. */
+export function assertNodeFields(node: unknown): void {
+  checkNodeFields(node, 5);
+  if (!isMatrix(node.transform)) throw new Error('Invalid node');
+}
+
+function checkNodeFields(node: unknown, version: 1 | 2 | 3 | 4 | 5): asserts node is Record<string, unknown> {
   if (!isRecord(node) || typeof node.id !== 'string' || !NODE_TYPES.includes(node.type as NodeType) ||
     typeof node.name !== 'string' ||
     !isFiniteNumber(node.x) || !isFiniteNumber(node.y) || !isFiniteNumber(node.width) || !isFiniteNumber(node.height) ||
@@ -293,7 +405,10 @@ function checkNodeFields(node: unknown, version: 1 | 2 | 3 | 4): asserts node is
   if (!optional(node.textAlign, (value) => ['left', 'center', 'right', 'justify'].includes(value as string)) ||
     !optional(node.verticalAlign, (value) => ['top', 'middle', 'bottom'].includes(value as string)) ||
     !optional(node.lineHeight, isFiniteNumber) || !optional(node.letterSpacing, isFiniteNumber)) throw new Error('Invalid text');
-  if (version === 4 && (!optional(node.layout, isFlexLayout) || !optional(node.item, isLayoutItem) || !optional(node.constraints, isConstraints))) throw new Error('Invalid layout');
+  if (version === 5 && !isComponentFields(node)) throw new Error('Invalid component fields');
+  if (!optional(node.path, (value) => isArrayOf(value, isSubPath)) || !optional(node.boolOp, (value) => ['union', 'subtract', 'intersect', 'exclude'].includes(value as string))) throw new Error('Invalid path');
+  if (!optional(node.interactions, (value) => isArrayOf(value, isInteraction)) || !optional(node.fixedScroll, isBoolean)) throw new Error('Invalid interaction');
+  if (version >= 4 && (!optional(node.layout, isFlexLayout) || !optional(node.item, isLayoutItem) || !optional(node.constraints, isConstraints))) throw new Error('Invalid layout');
 }
 
 function isFlexLayout(value: unknown): boolean {
@@ -376,4 +491,57 @@ function isStringArray(value: unknown): value is string[] {
 
 function isMatrix(value: unknown): value is Matrix {
   return Array.isArray(value) && value.length === 6 && value.every(isFiniteNumber);
+}
+
+function isComponentFields(node: Record<string, unknown>): boolean {
+  const isString = (value: unknown): boolean => typeof value === 'string';
+  return optional(node.componentId, isString) && optional(node.mainInstance, isBoolean) && optional(node.componentSet, isBoolean) && optional(node.shapeRef, isString) &&
+    optional(node.touched, (value) => isArrayOf(value, (group) => SYNC_GROUP_NAMES.includes(group as SyncGroup))) &&
+    optional(node.tokens, (value) => isRecord(value) && Object.entries(value).every(([slot, id]) => slot in TOKEN_SLOT_TYPE && typeof id === 'string'));
+}
+
+/**
+ * 컴포넌트·토큰 등록 정보를 검사한다. 메인 도형이 실제로 있고, 인스턴스·토큰 참조가 등록된 id를 가리켜야 한다.
+ */
+function validateRegistries(doc: DesignDocument): DesignDocument {
+  if (!isRecord(doc.components) || !isRecord(doc.tokens)) throw new Error('Invalid registries');
+  const objectsById = new Map(doc.pages.flatMap((page) => Object.values(page.objects).map((node) => [node.id, { node, pageId: page.id }] as const)));
+  for (const [id, component] of Object.entries(doc.components)) {
+    if (!isRecord(component) || component.id !== id || typeof component.name !== 'string' || typeof component.mainId !== 'string' || typeof component.pageId !== 'string') throw new Error('Invalid component');
+    const main = objectsById.get(component.mainId);
+    if (!main || main.pageId !== component.pageId || main.node.componentId !== id || !main.node.mainInstance) throw new Error(`Invalid component main - ${id}`);
+    if (!optional(component.variant, (value) => isRecord(value) && Object.values(value).every((item) => typeof item === 'string')) || !optional(component.setId, (value) => typeof value === 'string')) throw new Error('Invalid component');
+  }
+  for (const [id, token] of Object.entries(doc.tokens)) {
+    if (!isRecord(token) || token.id !== id || typeof token.name !== 'string' || !['color', 'number'].includes(token.type as string) ||
+      (token.type === 'color' ? typeof token.value !== 'string' : !isFiniteNumber(token.value))) throw new Error('Invalid token');
+  }
+  for (const { node } of objectsById.values()) {
+    if (node.componentId && !doc.components[node.componentId]) throw new Error(`Unknown component - ${node.componentId}`);
+    for (const tokenId of Object.values(node.tokens ?? {})) if (!doc.tokens[tokenId!]) throw new Error(`Unknown token - ${tokenId}`);
+  }
+  return doc;
+}
+
+/** 저장된 상호작용 하나를 검사한다. URL은 문자열인지만 보고, 실행할 때 http·https만 연다(viewer). */
+function isInteraction(value: unknown): boolean {
+  if (!isRecord(value) || !TRIGGERS.includes(value.trigger as InteractionTrigger) || !optional(value.delay, (delay) => isFiniteNumber(delay) && delay >= 0)) return false;
+  const action = value.action;
+  if (!isRecord(action)) return false;
+  const isString = (item: unknown): boolean => typeof item === 'string';
+  switch (action.type) {
+    case 'navigate': return isString(action.destination);
+    case 'open-overlay':
+    case 'toggle-overlay':
+      return isString(action.destination) && OVERLAY_POSITIONS.includes(action.position as OverlayPosition) && isBoolean(action.closeOnOutside) && isBoolean(action.background);
+    case 'close-overlay': return optional(action.destination, isString);
+    case 'back': return true;
+    case 'open-url': return isString(action.url);
+    default: return false;
+  }
+}
+
+function isSubPath(value: unknown): boolean {
+  const isPoint = (point: unknown): boolean => isRecord(point) && isFiniteNumber(point.x) && isFiniteNumber(point.y);
+  return isRecord(value) && isBoolean(value.closed) && isArrayOf(value.points, (point) => isPoint(point) && optional((point as Record<string, unknown>).in, isPoint) && optional((point as Record<string, unknown>).out, isPoint));
 }

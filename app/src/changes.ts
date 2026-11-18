@@ -1,6 +1,8 @@
-import { IDENTITY, isContainer, walkPage, type Constraints, type DesignDocument, type DesignNode, type Matrix, type NodeInput, type Page, type ShapeAttrs } from './model.ts';
+import { IDENTITY, isContainer, walkPage, type BoolOp, type Component, type Constraints, type DesignDocument, type SubPath, type Token, type DesignNode, type Matrix, type NodeInput, type Page, type ShapeAttrs } from './model.ts';
 import { applyPoint, applyVector, boundsOf, center, cleanMatrix, invert, linearPart, multiply, rotation, roundRect, worldCorners, worldMatrix, type Rect } from './geometry.ts';
 import { applyConstraints } from './layout.ts';
+import { booleanGeometry, ellipsePath, geometryPoints, geometryToPath } from './boolean.ts';
+import { mapPath, parsePathD, pathBounds } from './path.ts';
 
 const DEFAULT_CONSTRAINTS: Constraints = { h: 'left', v: 'top' };
 
@@ -15,6 +17,10 @@ export type Change =
   | { type: 'movObjects'; pageId: string; ids: string[]; parentId: string | null; index: number }
   | { type: 'addPage'; page: Page; index: number }
   | { type: 'delPage'; pageId: string }
+  | { type: 'setComponent'; component: Component }
+  | { type: 'delComponent'; id: string }
+  | { type: 'setToken'; token: Token }
+  | { type: 'delToken'; id: string }
   // 파일 열기·가져오기는 도형 단위 편집이 아니라 문서 교체다. 되돌릴 수 있도록 문서 전체를 담는다.
   | { type: 'setDocument'; document: DesignDocument };
 
@@ -51,6 +57,10 @@ export function applyChanges(doc: DesignDocument, changes: readonly Change[]): D
   for (const change of changes) {
     if (change.type === 'setDocument') { base = change.document; drafts.clear(); continue; }
     if (change.type === 'addPage') { base = withPageAdded(base, change.page, change.index); continue; }
+    if (change.type === 'setComponent') { base = { ...base, components: { ...base.components, [change.component.id]: change.component } }; continue; }
+    if (change.type === 'delComponent') { const { [change.id]: _removed, ...rest } = base.components; void _removed; base = { ...base, components: rest }; continue; }
+    if (change.type === 'setToken') { base = { ...base, tokens: { ...base.tokens, [change.token.id]: change.token } }; continue; }
+    if (change.type === 'delToken') { const { [change.id]: _removed, ...rest } = base.tokens; void _removed; base = { ...base, tokens: rest }; continue; }
     if (change.type === 'delPage') { base = { ...base, pages: base.pages.filter((page) => page.id !== change.pageId) }; drafts.delete(change.pageId); continue; }
     applyToPage(draftPage(change.pageId), change);
   }
@@ -327,6 +337,12 @@ export function resizeShape(doc: DesignDocument, pageId: string, id: string, box
   const node = findNode(findPage(doc, pageId), id);
   if (node.type === 'group') return resizeGroup(doc, pageId, node, box);
   if (node.type === 'frame') return resizeFrame(doc, pageId, node, box);
+  // 편집 경로가 있는 벡터는 경로도 같은 비율로 늘린다. 경로 좌표가 도형 지역 좌표이기 때문이다.
+  if (node.type === 'vector' && node.path) {
+    const sx = box.width / node.width;
+    const sy = box.height / node.height;
+    return updateShape(doc, pageId, id, { ...box, path: mapPath(node.path, (point) => ({ x: point.x * sx, y: point.y * sy })) });
+  }
   return updateShape(doc, pageId, id, box);
 }
 
@@ -432,7 +448,102 @@ function fitGroup(doc: DesignDocument, pageId: string, id: string): Transaction 
   const group = page.objects[id];
   if (!group) return EMPTY_TRANSACTION;
   if (!group.children?.length) return deleteShape(doc, pageId, id);
+  if (group.boolOp) return fitBoolean(doc, pageId, page, group);
   return updateShape(doc, pageId, id, groupBounds(page, group));
+}
+
+/**
+ * 불리언 그룹의 결과 경로를 다시 계산한다. 상자는 결과 모양을 감싸도록(그룹 회전축 기준) 맞추고, 경로는 그 상자의 지역 좌표로 둔다.
+ * 피연산자가 바뀔 때마다 그룹 보정 단계에서 불리므로 결과가 항상 피연산자를 따라간다.
+ */
+function fitBoolean(doc: DesignDocument, pageId: string, page: Page, group: DesignNode): Transaction {
+  const geometry = booleanGeometry(page, group);
+  const points = geometryPoints(geometry);
+  if (points.length === 0) return updateShape(doc, pageId, group.id, { path: [], fillRule: 'evenodd' });
+  const linear = linearPart(group.transform);
+  const local = boundsOf(points.map((point) => applyVector(invert(linear), point)));
+  const middle = applyVector(linear, { x: local.x + local.width / 2, y: local.y + local.height / 2 });
+  const box = roundRect({ x: middle.x - local.width / 2, y: middle.y - local.height / 2, width: Math.max(0.01, local.width), height: Math.max(0.01, local.height) });
+  return updateShape(doc, pageId, group.id, { ...box, path: geometryToPath(geometry, { ...group, ...box }), fillRule: 'evenodd' });
+}
+
+const BOOL_NAMES: Record<BoolOp, string> = { union: 'Union', subtract: 'Subtract', intersect: 'Intersect', exclude: 'Exclude' };
+
+/** 같은 부모의 도형들을 불리언 그룹으로 묶는다. 결과 색은 맨 아래 피연산자의 채우기·선을 따른다(Figma와 같음). */
+export function createBoolean(doc: DesignDocument, pageId: string, ids: readonly string[], op: BoolOp, groupId: string): Transaction {
+  const page = findPage(doc, pageId);
+  const nodes = ids.map((id) => findNode(page, id));
+  if (nodes.length < 2) throw new Error('불리언 연산에는 요소가 두 개 이상 필요합니다.');
+  if (nodes.some((node) => node.shapeRef)) throw new Error('인스턴스 안의 요소로는 불리언을 만들 수 없습니다.');
+  const siblings = childrenOf(page, nodes[0]!.parentId);
+  const bottom = [...nodes].sort((a, b) => siblings.indexOf(a.id) - siblings.indexOf(b.id))[0]!;
+  return composeTransactions(doc, [
+    (current) => groupShapes(current, pageId, ids, groupId),
+    (current) => updateShape(current, pageId, groupId, { boolOp: op, name: BOOL_NAMES[op], fills: bottom.fills.length ? bottom.fills : [{ type: 'solid', color: '#c4c4c4' }], ...(bottom.strokes?.length ? { strokes: bottom.strokes } : {}) })
+  ]);
+}
+
+/**
+ * 도형을 편집 경로를 가진 벡터로 바꾼다(Figma 평탄화 Ctrl+E). 불리언 그룹은 결과 경로가 되고, 사각형·타원·가져온 벡터는 같은 모양의 경로가 된다.
+ * 같은 id와 같은 순서로 바꿔 넣어 선택과 레이어 위치가 유지된다. 인스턴스 안의 요소는 메인과의 연결이 깨지므로 거부한다.
+ */
+export function flattenToPath(doc: DesignDocument, pageId: string, id: string): Transaction {
+  const page = findPage(doc, pageId);
+  const node = findNode(page, id);
+  if (node.shapeRef) throw new Error('인스턴스 안의 요소는 경로로 바꿀 수 없습니다. 메인 컴포넌트에서 바꾸세요.');
+  const converted = pathOf(node);
+  if (!converted) throw new Error('이 요소는 경로로 바꿀 수 없습니다.');
+  const index = childrenOf(page, node.parentId).indexOf(id);
+  const keep = Object.fromEntries((['opacity', 'effects', 'item', 'constraints', 'hidden', 'locked', 'tokens'] as const).filter((key) => node[key] !== undefined).map((key) => [key, node[key]]));
+  const input: NodeInput = { ...keep, id, type: 'vector', name: node.name, parentId: node.parentId, x: node.x, y: node.y, width: node.width, height: node.height, transform: node.transform, ...converted };
+  return composeTransactions(doc, [(current) => deleteShape(current, pageId, id), (current) => addShape(current, pageId, input, index)]);
+}
+
+function pathOf(node: DesignNode): Pick<NodeInput, 'path' | 'fills' | 'strokes' | 'fillRule'> | null {
+  if (node.boolOp) return { path: node.path ?? [], fills: node.fills, strokes: node.strokes, fillRule: 'evenodd' };
+  if (node.type === 'ellipse') return { path: ellipsePath(node.width, node.height), fills: node.fills, strokes: node.strokes };
+  // 자식이 있는 프레임을 경로로 바꾸면 자식이 사라지므로 빈 프레임만 바꾼다.
+  if (node.type === 'rectangle' || (node.type === 'frame' && !node.children?.length)) return { path: rectPath(node.width, node.height, node.radius ?? 0), fills: node.fills, strokes: node.strokes };
+  if (node.type !== 'vector') return null;
+  if (node.path) return { path: node.path, fills: node.fills, strokes: node.strokes };
+  const fills = (node.vectorPaths ?? []).filter((path) => path.fill !== 'none');
+  const strokes = (node.vectorPaths ?? []).filter((path) => path.stroke);
+  const view = node.viewBox ?? { width: node.width, height: node.height };
+  const scale = (point: { x: number; y: number }): { x: number; y: number } => ({ x: point.x * node.width / (view.width || 1), y: point.y * node.height / (view.height || 1) });
+  return {
+    path: mapPath([...fills, ...strokes].flatMap((path) => parsePathD(path.d)), scale),
+    fills: fills.length ? [{ type: 'solid', color: fills[0]!.fill }] : [],
+    strokes: strokes.length ? [{ color: strokes[0]!.stroke!, width: strokes[0]!.strokeWidth ?? 1, align: 'center' }] : node.strokes,
+    ...(fills[0]?.fillRule ? { fillRule: 'evenodd' as const } : {})
+  };
+}
+
+/** 모서리 반경이 있는 사각형 경로. 둥근 모서리는 네 점의 베지어 핸들로 나타낸다. */
+function rectPath(width: number, height: number, radius: number): SubPath[] {
+  const r = Math.max(0, Math.min(radius, width / 2, height / 2));
+  if (r === 0) return [{ closed: true, points: [{ x: 0, y: 0 }, { x: width, y: 0 }, { x: width, y: height }, { x: 0, y: height }] }];
+  const k = r * (1 - 0.5522847498);
+  return [{ closed: true, points: [
+    { x: r, y: 0, in: { x: k, y: 0 } }, { x: width - r, y: 0, out: { x: width - k, y: 0 } },
+    { x: width, y: r, in: { x: width, y: k } }, { x: width, y: height - r, out: { x: width, y: height - k } },
+    { x: width - r, y: height, in: { x: width - k, y: height } }, { x: r, y: height, out: { x: k, y: height } },
+    { x: 0, y: height - r, in: { x: 0, y: height - k } }, { x: 0, y: r, out: { x: 0, y: k } }
+  ] }];
+}
+
+/**
+ * 경로를 바꾼 뒤 도형 상자를 경로가 차지하는 영역에 맞춘다. 경로 좌표를 옮긴 만큼 상자를 반대로 옮겨 화면 위치는 그대로다.
+ * 펜으로 그리거나 점을 옮긴 뒤 커밋할 때 쓴다.
+ */
+export function fitPathBounds(doc: DesignDocument, pageId: string, id: string): Transaction {
+  const node = findNode(findPage(doc, pageId), id);
+  if (!node.path) return EMPTY_TRANSACTION;
+  const bounds = pathBounds(node.path);
+  if (!bounds) return EMPTY_TRANSACTION;
+  const width = Math.max(0.01, bounds.width);
+  const height = Math.max(0.01, bounds.height);
+  const placed = applyPoint(worldMatrix(node), { x: bounds.x + width / 2, y: bounds.y + height / 2 });
+  return updateShape(doc, pageId, id, { ...roundRect({ x: placed.x - width / 2, y: placed.y - height / 2, width, height }), path: mapPath(node.path, (point) => ({ x: point.x - bounds.x, y: point.y - bounds.y })) });
 }
 
 /** 그룹 자식의 꼭짓점을 그룹 회전축 기준으로 감싸는 상자. 그룹이 회전돼 있어도 상자가 그룹과 같이 기울어 있다. */
@@ -445,4 +556,26 @@ function groupBounds(page: Page, group: DesignNode): Rect {
   const width = Math.max(1, local.width);
   const height = Math.max(1, local.height);
   return roundRect({ x: middle.x - width / 2, y: middle.y - height / 2, width, height });
+}
+
+/** 컴포넌트 등록 정보를 넣거나 바꾼다. 되돌리면 이전 정보로, 없었으면 지운다. */
+export function setComponent(doc: DesignDocument, component: Component): Transaction {
+  const previous = doc.components[component.id];
+  return { redo: [{ type: 'setComponent', component }], undo: [previous ? { type: 'setComponent', component: previous } : { type: 'delComponent', id: component.id }] };
+}
+
+export function removeComponent(doc: DesignDocument, id: string): Transaction {
+  const previous = doc.components[id];
+  return previous ? { redo: [{ type: 'delComponent', id }], undo: [{ type: 'setComponent', component: previous }] } : EMPTY_TRANSACTION;
+}
+
+export function setToken(doc: DesignDocument, token: Token): Transaction {
+  const previous = doc.tokens[token.id];
+  if (previous && JSON.stringify(previous) === JSON.stringify(token)) return EMPTY_TRANSACTION;
+  return { redo: [{ type: 'setToken', token }], undo: [previous ? { type: 'setToken', token: previous } : { type: 'delToken', id: token.id }] };
+}
+
+export function removeToken(doc: DesignDocument, id: string): Transaction {
+  const previous = doc.tokens[id];
+  return previous ? { redo: [{ type: 'delToken', id }], undo: [{ type: 'setToken', token: previous }] } : EMPTY_TRANSACTION;
 }

@@ -69,12 +69,17 @@ export function rectBetween(a: Point, b: Point): Rect {
 }
 
 /** 레이어 패널 순서. Figma처럼 위에 그려지는 도형을 먼저 보여준다. */
-export function layerRows(page: Page): Array<{ node: DesignNode; depth: number }> {
+/**
+ * 레이어 패널의 행. expanded가 주어지면 그 안의 컨테이너만 펼친다(큰 문서에서 행 수를 줄이기 위해, Figma처럼 기본은 접힘).
+ * 없으면 모두 펼친다.
+ */
+export function layerRows(page: Page, expanded?: ReadonlySet<string>): Array<{ node: DesignNode; depth: number }> {
   const rows: Array<{ node: DesignNode; depth: number }> = [];
   const visit = (id: string, depth: number): void => {
     const node = page.objects[id];
     if (!node) return;
     rows.push({ node, depth });
+    if (expanded && !expanded.has(id)) return;
     [...(node.children ?? [])].reverse().forEach((child) => visit(child, depth + 1));
   };
   [...page.children].reverse().forEach((id) => visit(id, 0));

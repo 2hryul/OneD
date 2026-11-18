@@ -5,7 +5,8 @@ import { parseFig, type FigDocument, type FigNode } from 'openfig-core';
 import { parseDocument, sampleDocument, solid, walkPage, type DesignDocument, type FlexLayout } from '../src/model';
 import { applyChanges, addShape, resizeShape, updateShape } from '../src/changes';
 import { applyConstraints, computeFlex, distribute } from '../src/layout';
-import { dropIndex, layoutContainer, layoutContainers, normalizeAfterEdit } from '../src/layoutEdits';
+import { dropIndex, layoutContainer, layoutContainers } from '../src/layoutEdits';
+import { normalizeAfterEdit } from '../src/normalize';
 import { importFigNode } from '../src/figmaImport';
 import { exportTsx } from '../src/export';
 
@@ -122,7 +123,7 @@ describe('layout in the document', () => {
   it('exports auto layout as CSS flex with nested children', () => {
     const base = sampleDocument();
     const laid = applyChanges(base, normalizeAfterEdit(base, updateShape(base, PAGE, 'frame-1', { layout: flex({ direction: 'column', justify: 'center' }) })).redo);
-    const code = exportTsx(page(laid), 'frame-1').code;
+    const code = exportTsx(laid, PAGE, 'frame-1').code;
     expect(code).toContain('"display":"flex"');
     expect(code).toContain('"flexDirection":"column"');
     expect(code).toContain('"justifyContent":"center"');

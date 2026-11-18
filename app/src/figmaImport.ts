@@ -1,5 +1,6 @@
 import { parseFig, resolveVectorNodePaths, type FigDocument, type FigNode, type FigPaint } from 'openfig-core';
-import { pageFromNodes, type DesignDocument, type FlexLayout, type Matrix, type NodeInput, type NodeType } from './model.ts';
+import { isContainer, pageFromNodes, parseVariantName, type Component, type DesignDocument, type FlexLayout, type Matrix, type NodeInput, type NodeType, type Page, type Token } from './model.ts';
+import { topInstanceRoot, touchedAgainstMain } from './components.ts';
 import { applyPoint, cleanMatrix, linearPart, multiply } from './geometry.ts';
 import type { AssetRecord } from './assets.ts';
 import { figColor, figEffects, figPaints, figStrokes, figTextStyle, type ImportIssue, type StyleSink } from './figStyles.ts';
@@ -17,6 +18,11 @@ export interface ImportReport {
   unappliedOverrides: number;
   /** 변환하지 못했거나 근사한 항목. 노드 id(Figma), 이름, 종류, 내용. */
   issues: ImportIssue[];
+  /** Components 페이지에 만든 메인 컴포넌트 수와, 메인에 연결한 인스턴스 수. */
+  components: number;
+  linkedInstances: number;
+  /** Figma 채우기·선 스타일에서 만든 색 토큰 수. */
+  tokens: number;
 }
 
 export interface FigImportResult {
@@ -83,17 +89,124 @@ export function importFigNode(fig: FigDocument, rootId: string): FigImportResult
   const rootWorld = linearPart(figMatrix(root));
   walk(state, { source: root, id: rootId, parentId: null, world: rootWorld, isRoot: true, symbolTrail: new Set(), overrides: [] });
   finishOverrideReport(state);
+  // walk가 부모를 먼저 방문하므로 형제 순서가 Figma 레이어 순서(아래에서 위)와 같다.
+  const frameNodes = state.nodes;
+  const mains = importMains(state);
+  const components = linkInstances(state, [...frameNodes, ...mains.nodes], mains);
+  const pages = [pageFromNodes('page-1', 'Page 1', frameNodes), ...(mains.nodes.length ? [pageFromNodes(COMPONENTS_PAGE, 'Components', mains.nodes)] : [])];
+  state.report.linkedInstances = markImportedOverrides(pages);
+  state.report.components = Object.keys(components).length;
+  state.report.tokens = state.tokens.size;
   return {
-    // walk가 부모를 먼저 방문하므로 형제 순서가 Figma 레이어 순서(아래에서 위)와 같다.
-    document: { version: 4, name: `${root.name || 'Figma frame'} (${rootId})`, pages: [pageFromNodes('page-1', 'Page 1', state.nodes)] },
+    document: { version: 5, components, tokens: Object.fromEntries(state.tokens), name: `${root.name || 'Figma frame'} (${rootId})`, pages },
     assets: [...state.sink.assets.values()],
     report: state.report
   };
 }
 
+const COMPONENTS_PAGE = 'components';
+
+interface MainImport { nodes: NodeInput[]; mainIdOf: Map<string, string>; components: Record<string, Component>; setIds: Set<string> }
+
+/**
+ * 가져온 프레임이 쓰는 컴포넌트의 메인을 Components 페이지에 만든다. 메인 안의 인스턴스가 쓰는 컴포넌트도 차례로 가져온다.
+ * variant면 세트 전체를 가져와야 다른 variant로 바꿀 수 있으므로 세트 프레임을 통째로 가져온다.
+ * 메인을 가져오며 생긴 개수·보고는 가져오기 결과 통계에 섞이지 않도록 되돌린다.
+ */
+function importMains(state: WalkState): MainImport {
+  const counts = { ...state.report, issues: state.report.issues.length };
+  const result: MainImport = { nodes: [], mainIdOf: new Map(), components: {}, setIds: new Set() };
+  const queue = [...new Set(state.instanceSymbols.values())];
+  let offsetY = 0;
+  while (queue.length) {
+    const symbolId = queue.shift()!;
+    if (result.mainIdOf.has(symbolId)) continue;
+    const symbol = state.fig.nodeMap.get(symbolId);
+    if (!symbol?.size) continue;
+    const parent = symbol.parentIndex?.guid ? state.fig.nodeMap.get(guidId(symbol.parentIndex.guid as Guid)) : undefined;
+    const source = parent?.isStateGroup ? parent : symbol;
+    const rootId = parent?.isStateGroup ? `set:${guidId(parent.guid)}` : `main:${symbolId}`;
+    const start = result.nodes.length;
+    state.nodes = result.nodes;
+    walk(state, { source, id: rootId, parentId: null, world: linearPart(figMatrix(source)), isRoot: true, symbolTrail: new Set([symbolId]), overrides: [] });
+    // 메인들을 세로로 늘어놓는다. 가져오기는 루트를 원점에 두므로 이번에 추가된 도형만 아래로 민다.
+    for (const node of result.nodes.slice(start)) node.y += offsetY;
+    offsetY += (source.size?.y ?? 0) + 200;
+    registerMains(state, source, rootId, result);
+    for (const used of state.instanceSymbols.values()) if (!result.mainIdOf.has(used)) queue.push(used);
+  }
+  Object.assign(state.report, { imported: counts.imported, expandedInstances: counts.expandedInstances, unresolvedInstances: counts.unresolvedInstances, approximatedShapes: counts.approximatedShapes });
+  state.report.issues.length = counts.issues;
+  return result;
+}
+
+function registerMains(state: WalkState, source: FigNode, rootId: string, result: MainImport): void {
+  if (!source.isStateGroup) {
+    const id = guidId(source.guid);
+    result.mainIdOf.set(id, rootId);
+    result.components[id] = { id, name: source.name, mainId: rootId, pageId: COMPONENTS_PAGE };
+    return;
+  }
+  result.setIds.add(rootId);
+  for (const child of state.fig.childrenMap.get(guidId(source.guid)) ?? []) {
+    if (child.type !== 'SYMBOL') continue;
+    const id = guidId(child.guid);
+    const mainId = `${rootId}/${id}`;
+    if (!result.nodes.some((node) => node.id === mainId)) continue;
+    result.mainIdOf.set(id, mainId);
+    result.components[id] = { id, name: source.name, mainId, pageId: COMPONENTS_PAGE, setId: rootId, variant: parseVariantName(child.name) ?? { 'Property 1': child.name } };
+  }
+}
+
+/**
+ * 펼쳐 둔 인스턴스를 메인에 연결한다. 가장 바깥 인스턴스 아래 도형은 그 메인의 같은 경로 도형을 가리킨다(id 뒷부분이 같다).
+ * 안쪽 인스턴스 루트는 자기 컴포넌트 id를 유지해 바깥 인스턴스를 풀어도 인스턴스로 남게 한다.
+ */
+function linkInstances(state: WalkState, nodes: NodeInput[], mains: MainImport): Record<string, Component> {
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  for (const [symbolId, mainId] of mains.mainIdOf) { const main = byId.get(mainId); if (main) Object.assign(main, { componentId: symbolId, mainInstance: true }); }
+  for (const setId of mains.setIds) { const set = byId.get(setId); if (set) set.componentSet = true; }
+  for (const node of nodes) {
+    let outer: NodeInput | undefined;
+    for (let current: NodeInput | undefined = node; current; current = current.parentId ? byId.get(current.parentId) : undefined) if (state.instanceSymbols.has(current.id)) outer = current;
+    const ownSymbol = state.instanceSymbols.get(node.id);
+    if (ownSymbol && mains.mainIdOf.has(ownSymbol)) node.componentId = ownSymbol;
+    if (!outer) continue;
+    const mainId = mains.mainIdOf.get(state.instanceSymbols.get(outer.id)!);
+    if (!mainId) continue;
+    const ref = node === outer ? mainId : `${mainId}${node.id.slice(outer.id.length)}`;
+    if (byId.has(ref)) node.shapeRef = ref;
+  }
+  return mains.components;
+}
+
+/** 가져온 인스턴스 도형을 메인과 비교해 다른 속성 묶음을 touched로 둔다. 연결한 인스턴스 루트 수를 돌려준다. */
+function markImportedOverrides(pages: Page[]): number {
+  const objects = new Map(pages.flatMap((page) => Object.values(page.objects).map((node) => [node.id, node] as const)));
+  let roots = 0;
+  for (const page of pages) {
+    for (const node of Object.values(page.objects)) {
+      if (!node.shapeRef) continue;
+      const main = objects.get(node.shapeRef);
+      const root = topInstanceRoot(page, node.id);
+      const mainRoot = root?.shapeRef ? objects.get(root.shapeRef) : undefined;
+      if (!main || !root || !mainRoot) continue;
+      if (node === root) roots++;
+      const groups = touchedAgainstMain(node, main, root, mainRoot);
+      if (groups.length) node.touched = groups;
+    }
+  }
+  return roots;
+}
+
 interface WalkState {
   fig: FigDocument;
   sink: StyleSink;
+  /** 펼친 인스턴스 id → 컴포넌트(SYMBOL) id. 메인을 가져오고 인스턴스를 연결할 때 쓴다. */
+  instanceSymbols: Map<string, string>;
+  /** Figma 채우기 스타일 키 → 스타일 노드. */
+  styles: Map<string, FigNode>;
+  tokens: Map<string, Token>;
   nodes: NodeInput[];
   report: ImportReport;
   overrides: FigOverride[];
@@ -104,8 +217,9 @@ interface WalkState {
 interface WalkInput { source: FigNode; id: string; parentId: string | null; world: Matrix; isRoot: boolean; symbolTrail: Set<string>; overrides: FigOverride[]; parentLayout?: FlexLayout }
 
 function createState(fig: FigDocument): WalkState {
-  const report: ImportReport = { imported: 0, expandedInstances: 0, unresolvedInstances: 0, approximatedShapes: 0, appliedOverrides: 0, unappliedOverrides: 0, issues: [] };
-  return { fig, sink: { fig, assets: new Map(), issues: report.issues }, nodes: [], report, overrides: [], applied: new Set(), hiddenTargets: new Set() };
+  const report: ImportReport = { imported: 0, expandedInstances: 0, unresolvedInstances: 0, approximatedShapes: 0, appliedOverrides: 0, unappliedOverrides: 0, issues: [], components: 0, linkedInstances: 0, tokens: 0 };
+  const styles = new Map(fig.nodes.filter((node) => node.styleType === 'FILL' && typeof node.key === 'string').map((node) => [node.key as string, node]));
+  return { fig, sink: { fig, assets: new Map(), issues: report.issues }, nodes: [], report, overrides: [], applied: new Set(), hiddenTargets: new Set(), instanceSymbols: new Map(), styles, tokens: new Map() };
 }
 
 function walk(state: WalkState, input: WalkInput): void {
@@ -115,8 +229,8 @@ function walk(state: WalkState, input: WalkInput): void {
   const effective = Object.assign({}, source, ...own.map((item) => item.patch)) as FigNode;
   for (const item of own) state.applied.add(item.id);
   const remaining = overrides.flatMap((item) => item.path[0] === key ? (item.path.length > 1 ? [{ ...item, path: item.path.slice(1) }] : []) : [item]);
-  if (effective.visible === false || effective.phase === 'REMOVED' || !effective.size) {
-    // 숨긴 노드 아래를 가리키는 override는 적용할 대상이 그려지지 않는다. 미적용 원인을 구분하려고 기록한다.
+  // 숨긴 노드도 hidden으로 가져온다. 메인에서는 숨겼지만 인스턴스에서 override로 보이게 한 노드가 메인 쪽 짝을 가져야 동기화가 지우지 않는다.
+  if (effective.phase === 'REMOVED' || !effective.size) {
     for (const item of overrides) if (item.path[0] === key && item.path.length > 1) state.hiddenTargets.add(item.id);
     return;
   }
@@ -126,6 +240,8 @@ function walk(state: WalkState, input: WalkInput): void {
   const converted = convertNode(state, shaped, id, input.parentId, world, input.parentLayout);
   state.nodes.push(converted);
   state.report.imported++;
+  // 불리언 연산 등 벡터로 바꾼 노드의 자식(피연산자)은 이미 경로에 들어 있으므로 따로 가져오지 않는다.
+  if (!isContainer(converted)) return;
   for (const child of state.fig.childrenMap.get(nodeId(source)) ?? []) {
     walk(state, { source: child, id: `${id}/${nodeId(child)}`, parentId: id, world, isRoot: false, symbolTrail: input.symbolTrail, overrides: remaining, parentLayout: converted.layout });
   }
@@ -169,6 +285,7 @@ function expandInstance(state: WalkState, instance: FigNode, id: string, world: 
     return;
   }
   state.report.expandedInstances++;
+  state.instanceSymbols.set(id, symbolId);
   const trail = new Set(symbolTrail).add(symbolId);
   for (const child of state.fig.childrenMap.get(symbolId) ?? []) {
     walk(state, { source: child, id: `${id}/${nodeId(child)}`, parentId: id, world, isRoot: false, symbolTrail: trail, overrides: [...own, ...remaining], parentLayout: context.layout });
@@ -188,17 +305,21 @@ function convertNode(state: WalkState, node: FigNode, id: string, parentId: stri
     id, parentId, type, name: node.name || type, width, height, ...placeBox(world, width, height),
     fills: type === 'group' ? [] : figPaints(state.sink, node, id, node.fillPaints),
     sourceType: node.type,
+    ...(node.visible === false ? { hidden: true } : {}),
     ...(strokes.length ? { strokes } : {}),
     ...(effects.length ? { effects } : {}),
     ...(node.opacity !== undefined && node.opacity < 1 ? { opacity: node.opacity } : {}),
     ...(node.cornerRadius ? { radius: node.cornerRadius } : {}),
     ...(type === 'frame' && node.frameMaskDisabled ? { clipContent: false } : {}),
+    // Figma "스크롤할 때 위치 고정". 보기 모드는 화면 바로 아래 자식에서만 이 값을 쓴다.
+    ...((node as { scrollBehavior?: string }).scrollBehavior === 'FIXED_WHEN_CHILD_OF_SCROLLING_FRAME' ? { fixedScroll: true } : {}),
     ...(layout ? { layout } : {}),
     ...(item ? { item } : {}),
     ...(constraints ? { constraints } : {}),
+    ...styleTokens(state, node),
     ...(type === 'text' ? figTextStyle(state.sink, node, id) : {})
   };
-  if (type === 'vector') base.vectorPaths = vectorPaths(state, node, id, width, height);
+  if (type === 'vector') { base.vectorPaths = vectorPaths(state, node, id, width, height); base.viewBox = { width, height }; }
   return base;
 }
 
@@ -252,6 +373,29 @@ function finishOverrideReport(state: WalkState): void {
     if (state.applied.has(item.id)) continue;
     const keys = Object.keys(item.patch).filter((key) => key !== 'guidPath').join(', ') || '(속성 없음)';
     const hidden = state.hiddenTargets.has(item.id);
-    state.report.issues.push({ nodeId: item.instance, name: `override ${item.path.join(' > ')}`, kind: hidden ? 'override-target-hidden' : 'override-target-missing', detail: `${hidden ? '대상이 숨겨진 노드 아래에 있음' : '경로에 맞는 노드 없음'} · 속성: ${keys}` });
+    state.report.issues.push({ nodeId: item.instance, name: `override ${item.path.join(' > ')}`, kind: hidden ? 'override-target-hidden' : 'override-target-missing', detail: `${hidden ? '대상이 삭제됐거나 크기가 없는 노드 아래에 있음' : '경로에 맞는 노드 없음'} · 속성: ${keys}` });
   }
+}
+
+/**
+ * Figma 채우기·선 스타일 참조를 색 토큰으로 바꾼다. 같은 스타일은 같은 토큰 하나가 되고, 이름은 스타일 이름(예: Primary/Gray/900)이다.
+ */
+function styleTokens(state: WalkState, node: FigNode): { tokens?: Partial<Record<'fill' | 'stroke', string>> } {
+  const refs: Partial<Record<'fill' | 'stroke', string>> = {};
+  const fillKey = (node.styleIdForFill as { assetRef?: { key?: string } } | undefined)?.assetRef?.key;
+  const strokeKey = (node.styleIdForStrokeFill as { assetRef?: { key?: string } } | undefined)?.assetRef?.key;
+  const fill = fillKey ? styleToken(state, fillKey) : null;
+  const stroke = strokeKey ? styleToken(state, strokeKey) : null;
+  if (fill && node.fillPaints?.some((paint) => paint.type === 'SOLID' && paint.visible !== false)) refs.fill = fill;
+  if (stroke && node.strokePaints?.some((paint) => paint.type === 'SOLID' && paint.visible !== false)) refs.stroke = stroke;
+  return Object.keys(refs).length ? { tokens: refs } : {};
+}
+
+function styleToken(state: WalkState, key: string): string | null {
+  const style = state.styles.get(key);
+  const paint = style?.fillPaints?.find((item) => item.type === 'SOLID' && item.visible !== false);
+  if (!style || !paint) return null;
+  const id = `style-${key}`;
+  if (!state.tokens.has(id)) state.tokens.set(id, { id, name: style.name, type: 'color', value: figColor(paint.color, paint.opacity ?? 1) });
+  return id;
 }
