@@ -1,5 +1,8 @@
-import { IDENTITY, isContainer, walkPage, type DesignDocument, type DesignNode, type Matrix, type NodeInput, type Page, type ShapeAttrs } from './model';
-import { applyVector, boundsOf, center, cleanMatrix, invert, linearPart, multiply, rotation, roundRect, worldCorners, type Rect } from './geometry';
+import { IDENTITY, isContainer, walkPage, type Constraints, type DesignDocument, type DesignNode, type Matrix, type NodeInput, type Page, type ShapeAttrs } from './model.ts';
+import { applyPoint, applyVector, boundsOf, center, cleanMatrix, invert, linearPart, multiply, rotation, roundRect, worldCorners, worldMatrix, type Rect } from './geometry.ts';
+import { applyConstraints } from './layout.ts';
+
+const DEFAULT_CONSTRAINTS: Constraints = { h: 'left', v: 'top' };
 
 /**
  * 문서 변경의 최소 단위. Penpot `common/files/changes.cljc`의 add-obj, mod-obj, del-obj, mov-objects를 따른다.
@@ -173,16 +176,19 @@ export function updateShape(doc: DesignDocument, pageId: string, id: string, pat
   const set: Record<string, unknown> = {};
   const undoSet: Record<string, unknown> = {};
   const undoUnset: Array<keyof ShapeAttrs> = [];
+  const unset: Array<keyof ShapeAttrs> = [];
   for (const [key, value] of Object.entries(patch)) {
-    if (LOCKED_KEYS.has(key) || value === undefined) continue;
+    if (LOCKED_KEYS.has(key)) continue;
     const previous = (node as unknown as Record<string, unknown>)[key];
+    // 값이 undefined면 속성을 지운다(예: 오토 레이아웃 제거). 원래 없던 속성이면 할 일이 없다.
+    if (value === undefined) { if (key in node) { unset.push(key as keyof ShapeAttrs); undoSet[key] = previous; } continue; }
     if (sameValue(previous, value)) continue;
     set[key] = value;
     if (key in node) undoSet[key] = previous; else undoUnset.push(key as keyof ShapeAttrs);
   }
-  if (Object.keys(set).length === 0) return EMPTY_TRANSACTION;
+  if (Object.keys(set).length === 0 && unset.length === 0) return EMPTY_TRANSACTION;
   return {
-    redo: [{ type: 'modObj', pageId, id, set: set as Partial<ShapeAttrs> }],
+    redo: [{ type: 'modObj', pageId, id, set: set as Partial<ShapeAttrs>, ...(unset.length ? { unset } : {}) }],
     undo: [{ type: 'modObj', pageId, id, set: undoSet as Partial<ShapeAttrs>, ...(undoUnset.length ? { unset: undoUnset } : {}) }]
   };
 }
@@ -318,23 +324,52 @@ export function rotateShape(doc: DesignDocument, pageId: string, id: string, deg
  * 도형 상자를 box로 바꾼다. 프레임의 자식은 그대로 두고(Figma 기본 제약 left, top), 그룹은 자식을 같은 비율로 늘린다.
  */
 export function resizeShape(doc: DesignDocument, pageId: string, id: string, box: Rect): Transaction {
+  const node = findNode(findPage(doc, pageId), id);
+  if (node.type === 'group') return resizeGroup(doc, pageId, node, box);
+  if (node.type === 'frame') return resizeFrame(doc, pageId, node, box);
+  return updateShape(doc, pageId, id, box);
+}
+
+function resizeGroup(doc: DesignDocument, pageId: string, node: DesignNode, box: Rect): Transaction {
   const page = findPage(doc, pageId);
-  const node = findNode(page, id);
-  if (node.type !== 'group') return updateShape(doc, pageId, id, box);
   const sx = box.width / node.width;
   const sy = box.height / node.height;
   const linear = linearPart(node.transform);
   const toLocal = invert(linear);
   const from = center(node);
   const to = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
-  const steps: Step[] = walkPage(page, [id]).slice(1).map((child) => (current: DesignDocument) => {
+  const steps: Step[] = walkPage(page, [node.id]).slice(1).map((child) => (current: DesignDocument) => {
     const local = applyVector(toLocal, { x: center(child).x - from.x, y: center(child).y - from.y });
     const moved = applyVector(linear, { x: local.x * sx, y: local.y * sy });
     const width = child.width * sx;
     const height = child.height * sy;
     return updateShape(current, pageId, child.id, roundRect({ x: to.x + moved.x - width / 2, y: to.y + moved.y - height / 2, width, height }));
   });
-  return composeTransactions(doc, [(current) => updateShape(current, pageId, id, box), ...steps]);
+  return composeTransactions(doc, [(current) => updateShape(current, pageId, node.id, box), ...steps]);
+}
+
+/**
+ * 프레임 상자를 바꾸고 직계 자식을 제약(constraints)에 따라 옮기거나 늘린다(Penpot geom/shapes/constraints.cljc와 같은 규칙).
+ * 프레임 지역 좌표에서 계산한 뒤 새 상자의 행렬로 되돌리므로 회전된 프레임에도 맞는다.
+ * 레이아웃 프레임의 자식은 left·top으로 따라가기만 하고, 실제 배치는 뒤이은 레이아웃 계산이 정한다.
+ */
+function resizeFrame(doc: DesignDocument, pageId: string, frame: DesignNode, box: Rect): Transaction {
+  const toLocal = invert(worldMatrix(frame));
+  const after = worldMatrix({ ...frame, ...box });
+  const steps: Step[] = (frame.children ?? []).map((childId) => (current: DesignDocument) => {
+    const child = findPage(current, pageId).objects[childId];
+    if (!child) return EMPTY_TRANSACTION;
+    const c = applyPoint(toLocal, center(child));
+    const local = { x: c.x - child.width / 2, y: c.y - child.height / 2, width: child.width, height: child.height };
+    const rule = frame.layout ? DEFAULT_CONSTRAINTS : child.constraints ?? DEFAULT_CONSTRAINTS;
+    const next = applyConstraints(local, { width: frame.width, height: frame.height }, box, rule);
+    const placed = applyPoint(after, { x: next.x + next.width / 2, y: next.y + next.height / 2 });
+    const target = roundRect({ x: placed.x - next.width / 2, y: placed.y - next.height / 2, width: next.width, height: next.height });
+    return target.width === child.width && target.height === child.height
+      ? moveShapes(current, pageId, childId, target.x - child.x, target.y - child.y)
+      : resizeShape(current, pageId, childId, target);
+  });
+  return composeTransactions(doc, [(current) => updateShape(current, pageId, frame.id, box), ...steps]);
 }
 
 /** 같은 부모 아래의 도형들을 새 그룹으로 묶는다. 그룹은 묶인 도형 중 가장 위 도형 자리에 들어간다. */
@@ -349,7 +384,7 @@ export function groupShapes(doc: DesignDocument, pageId: string, ids: readonly s
   const top = siblings.indexOf(ordered[ordered.length - 1]!);
   const box = roundRect(boundsOf(nodes.flatMap(worldCorners)));
   return composeTransactions(doc, [
-    (current) => addShape(current, pageId, { id: groupId, type: 'group', name: 'Group', parentId, ...box, fill: 'transparent' }, top + 1),
+    (current) => addShape(current, pageId, { id: groupId, type: 'group', name: 'Group', parentId, ...box, fills: [] }, top + 1),
     ...ordered.map((id, index) => (current: DesignDocument) => reparentShape(current, pageId, id, groupId, index))
   ]);
 }

@@ -2,6 +2,7 @@ import type { CSSProperties } from 'react';
 import { IDENTITY, type DesignNode, type Matrix, type Page } from './model';
 import { HANDLES, boundsOf, cssMatrix, handlePoint, invert, multiply, worldCorners, worldMatrix, type Handle, type Rect } from './geometry';
 import type { Guide } from './snapping';
+import { paintsToBackground, strokeAndEffectCss, textCss, textRuns, type AssetResolver } from './styleCss';
 
 const HANDLE_CURSOR: Record<Handle, string> = { n: 'ns-resize', s: 'ns-resize', e: 'ew-resize', w: 'ew-resize', ne: 'nesw-resize', sw: 'nesw-resize', nw: 'nwse-resize', se: 'nwse-resize' };
 
@@ -9,11 +10,12 @@ interface CanvasNodesProps {
   page: Page;
   editingId: string | null;
   onTextDone: (id: string, text: string | null) => void;
+  resolveAsset: AssetResolver;
 }
 
 /** 페이지의 최상위 도형부터 트리 그대로 중첩해 그린다. */
-export function CanvasNodes({ page, editingId, onTextDone }: CanvasNodesProps): JSX.Element {
-  return <>{page.children.map((id) => <NodeView key={id} page={page} id={id} parentWorld={IDENTITY as Matrix} parentLocked={false} editingId={editingId} onTextDone={onTextDone} />)}</>;
+export function CanvasNodes({ page, editingId, onTextDone, resolveAsset }: CanvasNodesProps): JSX.Element {
+  return <>{page.children.map((id) => <NodeView key={id} page={page} id={id} parentWorld={IDENTITY as Matrix} parentLocked={false} editingId={editingId} onTextDone={onTextDone} resolveAsset={resolveAsset} />)}</>;
 }
 
 interface NodeViewProps extends CanvasNodesProps { id: string; parentWorld: Matrix; parentLocked: boolean }
@@ -23,36 +25,46 @@ interface NodeViewProps extends CanvasNodesProps { id: string; parentWorld: Matr
  * 각 요소는 부모 요소 안에서 (부모 월드 행렬의 역) × (자기 월드 행렬)로 배치한다.
  * 이렇게 하면 프레임의 overflow:hidden이 회전된 프레임에서도 정확히 자르고, opacity가 자식에 상속된다.
  */
-function NodeView({ page, id, parentWorld, parentLocked, editingId, onTextDone }: NodeViewProps): JSX.Element | null {
+function NodeView({ page, id, parentWorld, parentLocked, editingId, onTextDone, resolveAsset }: NodeViewProps): JSX.Element | null {
   const node = page.objects[id];
   if (!node || node.hidden) return null;
   const world = worldMatrix(node);
   const locked = parentLocked || Boolean(node.locked);
   return (
-    <div data-node-id={node.id} className={`design-node node-${node.type}`} style={nodeStyle(node, multiply(invert(parentWorld), world), locked)}>
-      {node.type === 'text' ? (editingId === node.id ? <TextEditor node={node} onDone={onTextDone} /> : node.text) : null}
-      {node.type === 'vector' ? <svg width="100%" height="100%" viewBox={`0 0 ${node.width} ${node.height}`} aria-hidden="true">{node.vectorPaths?.map((path, index) => <path key={index} d={path.d} fill={path.fill} stroke={path.stroke} strokeWidth={path.strokeWidth} />)}</svg> : null}
-      {node.children?.map((child) => <NodeView key={child} page={page} id={child} parentWorld={world} parentLocked={locked} editingId={editingId} onTextDone={onTextDone} />)}
+    <div data-node-id={node.id} className={`design-node node-${node.type}`} style={nodeStyle(node, multiply(invert(parentWorld), world), locked, resolveAsset)}>
+      {node.type === 'text' ? (editingId === node.id ? <TextEditor node={node} onDone={onTextDone} /> : <TextContent node={node} />) : null}
+      {node.type === 'vector' ? <svg width="100%" height="100%" viewBox={`0 0 ${node.width} ${node.height}`} aria-hidden="true">{node.vectorPaths?.map((path, index) => <path key={index} d={path.d} fill={path.fill} fillRule={path.fillRule} stroke={path.stroke} strokeWidth={path.strokeWidth} />)}</svg> : null}
+      {node.children?.map((child) => <NodeView key={child} page={page} id={child} parentWorld={world} parentLocked={locked} editingId={editingId} onTextDone={onTextDone} resolveAsset={resolveAsset} />)}
     </div>
   );
 }
 
-function nodeStyle(node: DesignNode, local: Matrix, locked: boolean): CSSProperties {
-  const filled = node.type === 'frame' || node.type === 'rectangle' || node.type === 'ellipse';
+function nodeStyle(node: DesignNode, local: Matrix, locked: boolean, resolveAsset: AssetResolver): CSSProperties {
+  const paintable = node.type === 'frame' || node.type === 'rectangle' || node.type === 'ellipse';
   return {
     width: node.width,
     height: node.height,
     transform: cssMatrix(local),
-    background: filled ? node.fill : 'transparent',
-    color: node.type === 'text' ? node.fill : undefined,
-    fontSize: node.type === 'text' ? node.fontSize ?? 18 : undefined,
-    fontFamily: node.type === 'text' ? node.fontFamily : undefined,
-    fontWeight: node.type === 'text' ? node.fontWeight : undefined,
+    background: paintable ? paintsToBackground(node.fills, node.width, node.height, resolveAsset) : undefined,
+    ...strokeAndEffectCss(node),
+    ...(node.type === 'text' ? { ...textCss(node), fontSize: node.fontSize ?? 18, fontFamily: node.fontFamily, fontWeight: node.fontWeight } : {}),
     opacity: node.opacity,
+    overflow: node.type === 'frame' && node.clipContent !== false ? 'hidden' : undefined,
     borderRadius: node.type === 'ellipse' ? '50%' : node.radius ?? 0,
     // 그룹 상자의 빈 곳은 클릭되지 않게 하고 자식만 받는다. 잠긴 도형은 클릭이 아래 도형으로 지나간다.
     pointerEvents: locked || node.type === 'group' ? 'none' : 'auto'
-  };
+  } as CSSProperties;
+}
+
+/** 스타일 구간별로 글자를 나눠 그린다. 세로 정렬을 위해 한 덩어리로 감싼다. */
+function TextContent({ node }: { node: DesignNode }): JSX.Element {
+  return (
+    <div className="text-content">
+      {textRuns(node).map((run, index) => run.span
+        ? <span key={index} style={{ fontSize: run.span.fontSize, fontWeight: run.span.fontWeight, fontFamily: run.span.fontFamily, color: run.span.color }}>{run.text}</span>
+        : <span key={index}>{run.text}</span>)}
+    </div>
+  );
 }
 
 function TextEditor({ node, onDone }: { node: DesignNode; onDone: (id: string, text: string | null) => void }): JSX.Element {

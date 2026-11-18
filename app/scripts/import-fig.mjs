@@ -10,4 +10,6 @@ const fig = parseFig(new Uint8Array(readFileSync(filePath)));
 const result = importFigNode(fig, id);
 if (outputPath) writeFileSync(outputPath, JSON.stringify(result.document, null, 2));
 const imported = walkPage(result.document.pages[0]);
-console.log(JSON.stringify({ sourceNodes: fig.nodes.length, importedNodes: imported.length, root: imported[0]?.name, ...result.report, outputPath: outputPath ?? null }, null, 2));
+const { issues, ...counts } = result.report;
+const byKind = Object.fromEntries([...new Set(issues.map((item) => item.kind))].map((kind) => [kind, issues.filter((item) => item.kind === kind).length]));
+console.log(JSON.stringify({ sourceNodes: fig.nodes.length, importedNodes: imported.length, root: imported[0]?.name, ...counts, issuesByKind: byKind, assets: result.assets.length, outputPath: outputPath ?? null }, null, 2));

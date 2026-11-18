@@ -1,17 +1,21 @@
 import { useCallback, useEffect, useRef, useState, type ChangeEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
-import { emptyPage, parseDocument, walkPage, type DesignDocument, type DesignNode, type NodeInput, type Page } from './model';
+import { emptyPage, parseDocument, solid, walkPage, type DesignDocument, type DesignNode, type NodeInput, type Page, type Paint } from './model';
 import {
-  EMPTY_TRANSACTION, addPage, addShape, applyChanges, childrenOf, composeTransactions, deleteShapes, groupShapes, moveMany, moveShapes,
-  normalizeGroups, recordTransaction, reparentShape, replaceDocument, resizeShape, rotateShape, topLevelIds, ungroupShape, updateShape,
+  EMPTY_TRANSACTION, addPage, addShape, applyChanges, childrenOf, composeTransactions, deleteShapes, groupShapes, moveMany,
+  recordTransaction, reparentShape, replaceDocument, resizeShape, rotateShape, topLevelIds, ungroupShape, updateShape,
   type HistoryEntry, type Transaction
 } from './changes';
 import { boundsOf, center, resizeBox, rotationDegrees, worldCorners, type Handle, type Point, type Rect } from './geometry';
 import { snapMove, type Guide } from './snapping';
+import { dropIndex, normalizeAfterEdit } from './layoutEdits';
+import { cleanItem } from './layoutPanels';
 import { boundsOfIds, frameAt, marqueeHits, nearestFrameId, rectBetween, selectionTarget, snapTargets, subtreeIds } from './selection';
 import { CanvasNodes, SelectionOverlay } from './canvas';
 import { LayersPanel, PagesPanel, PropertiesPanel, type DropPosition } from './panels';
 import { exportTsx } from './export';
-import { figmaNodeId, importFigFile } from './figmaImport';
+import { figmaNodeId, importFigFile, type ImportReport } from './figmaImport';
+import { base64ToBytes, bytesToBase64, contentId, getAssets, putAssets, referencedAssets, sniffImageMime, type AssetRecord } from './assets';
+import { ImportReportModal } from './report';
 import { loadStoredDocument, readRecovery, saveStoredDocument } from './storage';
 
 type Tool = 'select' | 'hand' | 'frame' | 'rectangle' | 'ellipse' | 'text';
@@ -65,15 +69,34 @@ function message(error: unknown): string {
 }
 
 /**
- * 끌어 놓은 위치의 프레임이 지금 속한 프레임과 다르면 부모를 바꾸는 변경을 이동 Transaction 뒤에 붙인다(S2-06).
- * 그룹 안 도형을 같은 프레임 안에서 옮기면 그룹을 유지한다.
+ * 끌어 놓은 위치에 맞게 부모와 순서를 정하는 변경을 이동 Transaction 뒤에 붙인다(S2-06).
+ * 다른 프레임에 놓으면 그 프레임으로 옮기고, 오토 레이아웃 프레임에 놓으면 놓은 자리에 맞는 순서로 넣는다(Figma처럼 순서 바꾸기).
+ * 그룹 안 도형을 같은 일반 프레임 안에서 옮기면 그룹을 유지한다. absolute 자식은 레이아웃 순서에 끼지 않는다.
  */
 function withDropReparent(before: DesignDocument, pageId: string, ids: readonly string[], tx: Transaction, point: Point): Transaction {
   const moved = pageOf(applyChanges(before, tx.redo), pageId);
-  const target = frameAt(moved, point, subtreeIds(moved, ids))?.id ?? null;
-  const steps = ids.filter((id) => nearestFrameId(moved, id) !== target).map((id) => (current: DesignDocument) =>
-    reparentShape(current, pageId, id, target, childrenOf(pageOf(current, pageId), target).length));
+  const movingSet = subtreeIds(moved, ids);
+  const target = frameAt(moved, point, movingSet);
+  const targetId = target?.id ?? null;
+  const steps = ids.filter((id) => {
+    if (target?.layout) return !moved.objects[id]?.item?.absolute || moved.objects[id]?.parentId !== targetId;
+    return nearestFrameId(moved, id) !== targetId;
+  }).map((id, offset) => (current: DesignDocument) => {
+    const page = pageOf(current, pageId);
+    const index = target?.layout ? dropIndex(page, target.id, point, movingSet) + offset : childrenOf(page, targetId).length;
+    return reparentShape(current, pageId, id, targetId, index);
+  });
   return steps.length ? composeTransactions(before, [() => tx, ...steps]) : tx;
+}
+
+/**
+ * 사용자가 직접 크기를 바꾸면 그 축의 '채우기'·'내용에 맞춤'을 '고정'으로 바꾼다. 그대로 두면 다음 레이아웃 계산이 바꾼 크기를 되돌린다.
+ */
+function fixSizingOnResize(doc: DesignDocument, pageId: string, node: DesignNode, box: { width: number; height: number }): Transaction {
+  const h = node.item?.h && node.item.h !== 'fix' && Math.abs(box.width - node.width) > 0.005 ? 'fix' : node.item?.h;
+  const v = node.item?.v && node.item.v !== 'fix' && Math.abs(box.height - node.height) > 0.005 ? 'fix' : node.item?.v;
+  if (h === node.item?.h && v === node.item?.v) return EMPTY_TRANSACTION;
+  return updateShape(doc, pageId, node.id, { item: cleanItem({ ...node.item, h, v }) });
 }
 
 export function App(): JSX.Element {
@@ -104,6 +127,11 @@ export function App(): JSX.Element {
   const drag = useRef<Drag | null>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const imageRef = useRef<HTMLInputElement>(null);
+  const imageTarget = useRef<{ nodeId: string; index: number } | null>(null);
+  const [assetUrls, setAssetUrls] = useState<Record<string, string>>({});
+  const requestedAssets = useRef(new Set<string>());
+  const [importReport, setImportReport] = useState<ImportReport | null>(null);
 
   const page = pageOf(doc, pageId);
   const liveSelection = selectedIds.filter((id) => page.objects[id]);
@@ -134,7 +162,7 @@ export function App(): JSX.Element {
 
   /** before에 tx와 그룹 상자 보정을 적용하고 undo 기록에 남긴다. */
   const finalize = useCallback((before: DesignDocument, tx: Transaction, mergeKey?: string): void => {
-    const full = normalizeGroups(before, tx);
+    const full = normalizeAfterEdit(before, tx);
     if (full.redo.length === 0) { setDoc(before); return; }
     setDoc(applyChanges(before, full.redo));
     remember(full, mergeKey);
@@ -204,11 +232,16 @@ export function App(): JSX.Element {
       const node = pageOf(current.before, current.pageId).objects[current.id]!;
       if (current.kind === 'resize') {
         const delta = { x: (event.clientX - current.startX) / zoomRef.current, y: (event.clientY - current.startY) / zoomRef.current };
-        return resizeShape(current.before, current.pageId, current.id, resizeBox(node, current.handle, delta, event.shiftKey));
+        const box = resizeBox(node, current.handle, delta, event.shiftKey);
+        // 크기 조절은 레이아웃이 자식을 다시 배치하는 모습을 바로 보여준다.
+        return normalizeAfterEdit(current.before, composeTransactions(current.before, [
+          (doc) => resizeShape(doc, current.pageId, current.id, box),
+          (doc) => fixSizingOnResize(doc, current.pageId, node, box)
+        ]));
       }
       let target = current.baseAngle + angleOf(current.pivot, toWorld(event.clientX, event.clientY)) - current.startAngle;
       target = event.shiftKey ? Math.round(target / 15) * 15 : round2(target);
-      return rotateShape(current.before, current.pageId, current.id, target - current.baseAngle);
+      return normalizeAfterEdit(current.before, rotateShape(current.before, current.pageId, current.id, target - current.baseAngle));
     };
     const onUp = (event: PointerEvent): void => {
       const current = drag.current;
@@ -295,7 +328,7 @@ export function App(): JSX.Element {
     const id = crypto.randomUUID();
     const base = DRAW_DEFAULTS[drawTool];
     const node: NodeInput = { id, type: drawTool, name: base.name, parentId: frame?.id ?? null,
-      x: Math.round(point.x), y: Math.round(point.y), width: base.width, height: base.height, fill: base.fill,
+      x: Math.round(point.x), y: Math.round(point.y), width: base.width, height: base.height, fills: solid(base.fill),
       ...(drawTool === 'text' ? { text: 'Text', fontSize: 22 } : {}),
       ...(drawTool === 'rectangle' ? { radius: 8 } : {}) };
     if (!edit((current) => addShape(current, page.id, node))) return;
@@ -348,17 +381,19 @@ export function App(): JSX.Element {
 
   const finishText = (id: string, text: string | null): void => {
     setEditingId(null);
-    if (text !== null && page.objects[id]) edit((current) => updateShape(current, page.id, id, { text }));
+    // 구간 스타일은 글자 위치에 묶여 있어 내용이 바뀌면 어긋난다. 내용을 고치면 구간 스타일을 지운다.
+    if (text !== null && page.objects[id] && text !== page.objects[id]!.text) edit((current) => updateShape(current, page.id, id, { text, ...(page.objects[id]!.spans?.length ? { spans: [] } : {}) }));
   };
 
   /** 속성 패널 편집. 프레임은 위치를 바꾸면 자식도 같이 옮기고, 그룹은 크기를 바꾸면 자식을 같은 비율로 늘린다. */
   const setProperty = (node: DesignNode, patch: Partial<DesignNode>): void => {
-    const { x, y, width, height, ...rest } = patch;
+    const { x, y, width, height, ...changed } = patch;
+    const rest = changed.text !== undefined && node.spans?.length ? { ...changed, spans: [] } : changed;
     const box = { x: x ?? node.x, y: y ?? node.y, width: width ?? node.width, height: height ?? node.height };
     // 같은 도형의 같은 속성을 연달아 고치면 undo 한 번에 되돌아가도록 합칠 키를 붙인다.
     edit((current) => composeTransactions(current, [
-      (next) => node.type === 'group' ? resizeShape(next, page.id, node.id, box) : moveShapes(next, page.id, node.id, box.x - node.x, box.y - node.y),
-      (next) => node.type === 'group' ? EMPTY_TRANSACTION : updateShape(next, page.id, node.id, { width: box.width, height: box.height }),
+      (next) => resizeShape(next, page.id, node.id, box),
+      (next) => fixSizingOnResize(next, page.id, node, box),
       (next) => updateShape(next, page.id, node.id, rest)
     ]), `${node.id}:${Object.keys(patch).join(',')}`);
   };
@@ -375,6 +410,54 @@ export function App(): JSX.Element {
     // 패널은 위에 그려지는 도형을 위에 보여주므로, 대상 행 위에 놓으면 children 배열에서는 대상 뒤로 간다.
     const index = siblings.indexOf(targetId) + (position === 'above' ? 1 : 0);
     edit((current) => reparentShape(current, page.id, dragId, target.parentId, index));
+  };
+
+
+  /** 이미지 바이트를 IndexedDB에 넣고 화면에 쓸 object URL을 만든다. 저장에 실패해도 이번 세션 화면에는 보이게 한다. */
+  const storeAssets = useCallback(async (records: readonly AssetRecord[]): Promise<void> => {
+    if (records.length === 0) return;
+    try { await putAssets(records); }
+    catch (error) { setNotice(`이미지 저장 실패: ${message(error)}. 새로고침하면 이미지가 사라질 수 있습니다.`); }
+    for (const record of records) requestedAssets.current.add(record.id);
+    setAssetUrls((current) => ({ ...current, ...Object.fromEntries(records.map((record) => [record.id, URL.createObjectURL(new Blob([record.bytes as unknown as ArrayBuffer], { type: record.mime }))])) }));
+  }, []);
+
+  useEffect(() => {
+    // 문서가 참조하지만 아직 화면용 URL이 없는 이미지를 IndexedDB에서 읽는다. 같은 id는 한 번만 요청한다.
+    const missing = referencedAssets(doc).filter((id) => !requestedAssets.current.has(id));
+    if (missing.length === 0) return;
+    missing.forEach((id) => requestedAssets.current.add(id));
+    getAssets(missing)
+      .then((records) => setAssetUrls((current) => ({ ...current, ...Object.fromEntries(records.map((record) => [record.id, URL.createObjectURL(new Blob([record.bytes as unknown as ArrayBuffer], { type: record.mime }))])) })))
+      .catch((error: unknown) => setNotice(`이미지 불러오기 실패: ${message(error)}`));
+  }, [doc]);
+
+  /** JSON 저장 파일에는 이미지 바이트를 base64로 넣는다. 다른 브라우저에서 열어도 이미지가 보이게 하기 위해서다. */
+  const saveJson = async (): Promise<void> => {
+    const current = docRef.current;
+    let records: AssetRecord[] = [];
+    try { records = await getAssets(referencedAssets(current)); }
+    catch (error) { setNotice(`이미지 읽기 실패: ${message(error)}. 이미지 없이 저장합니다.`); }
+    const assets = Object.fromEntries(records.map((record) => [record.id, { mime: record.mime, base64: bytesToBase64(record.bytes) }]));
+    download(`${current.name || 'design'}.json`, JSON.stringify({ ...current, ...(records.length ? { assets } : {}) }, null, 2), 'application/json');
+  };
+
+  const pickImage = async (event: ChangeEvent<HTMLInputElement>): Promise<void> => {
+    const file = event.target.files?.[0];
+    const target = imageTarget.current;
+    event.target.value = '';
+    if (!file || !target) return;
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const mime = sniffImageMime(bytes);
+      if (!mime) { setNotice(`[pickImage] 이미지 형식을 알 수 없음 - ${file.name}`); return; }
+      const id = await contentId(bytes);
+      await storeAssets([{ id, mime, bytes }]);
+      const node = pageOf(docRef.current, pageId).objects[target.nodeId];
+      if (!node) return;
+      const fills: Paint[] = node.fills.map((paint, index) => (index === target.index && paint.type === 'image' ? { ...paint, assetId: id } : paint));
+      edit((current) => updateShape(current, pageId, node.id, { fills }));
+    } catch (error) { setNotice(`이미지 열기 실패: ${message(error)}`); }
   };
 
   const switchPage = (id: string): void => {
@@ -394,7 +477,9 @@ export function App(): JSX.Element {
         setPendingFig(file);
         setFigInput('');
       } else {
-        const loaded = parseDocument(await file.text());
+        const raw = await file.text();
+        const loaded = parseDocument(raw);
+        await storeAssets(embeddedAssets(raw));
         edit((current) => replaceDocument(current, loaded)); setPageId(loaded.pages[0]!.id); setSelectedIds([]); fitCanvas(loaded.pages[0]!);
         setNotice(`${file.name}을(를) 열었습니다.`);
       }
@@ -410,6 +495,8 @@ export function App(): JSX.Element {
     try {
       const imported = importFigFile(new Uint8Array(await pendingFig.arrayBuffer()), id);
       const first = imported.document.pages[0]!;
+      await storeAssets(imported.assets);
+      setImportReport(imported.report);
       edit((current) => replaceDocument(current, imported.document)); setPageId(first.id); setSelectedIds([id]); fitCanvas(first);
       setNotice(`${imported.report.imported}개 요소 · 인스턴스 ${imported.report.expandedInstances}개 · override ${imported.report.appliedOverrides}개 적용/${imported.report.unappliedOverrides}개 미적용 · 도형 ${imported.report.approximatedShapes}개 근사`);
       setPendingFig(null);
@@ -426,9 +513,10 @@ export function App(): JSX.Element {
         <div className="file-info"><input aria-label="문서 이름" value={doc.name} onChange={(event) => setDoc({ ...docRef.current, name: event.target.value })} /><span className={`saved-dot ${saveFailed ? 'failed' : ''}`} /> <span>{saveFailed ? '저장 실패' : '자동 저장됨'}</span></div>
         <div className="top-actions">
           <button onClick={() => fileRef.current?.click()}>열기</button>
-          <button onClick={() => download(`${doc.name || 'design'}.json`, JSON.stringify(doc, null, 2), 'application/json')}>JSON 저장</button>
+          <button onClick={() => { void saveJson(); }}>JSON 저장</button>
           <button className="primary" disabled={!selected} onClick={() => setCodeOpen(true)}>React 코드</button>
           <input ref={fileRef} type="file" accept=".json,.fig,application/json" hidden onChange={(event) => { void openFile(event); }} />
+          <input ref={imageRef} type="file" accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml" hidden onChange={(event) => { void pickImage(event); }} />
         </div>
       </header>
 
@@ -454,7 +542,7 @@ export function App(): JSX.Element {
           <div className="canvas-top-ruler"><span>0</span><span>200</span><span>400</span><span>600</span><span>800</span><span>1000</span></div>
           <div className="canvas-viewport" ref={viewportRef} onPointerDown={onCanvasDown} onDoubleClick={onCanvasDoubleClick} style={{ cursor: tool === 'hand' || spaceHeld ? 'grab' : tool === 'select' ? 'default' : 'crosshair' }}>
             <div className="canvas-world" style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }}>
-              <CanvasNodes page={page} editingId={editingId} onTextDone={finishText} />
+              <CanvasNodes page={page} editingId={editingId} onTextDone={finishText} resolveAsset={(assetId) => assetUrls[assetId] ?? null} />
               <SelectionOverlay page={page} selectedIds={liveSelection} editingId={editingId} zoom={zoom} guides={guides} marquee={marquee} />
             </div>
           </div>
@@ -463,7 +551,8 @@ export function App(): JSX.Element {
 
         <aside className="right-panel">
           <div className="panel-heading"><strong>디자인</strong><span className="panel-tab">속성</span></div>
-          {selected ? <PropertiesPanel node={selected}
+          {selected ? <PropertiesPanel key={selected.id} node={selected} parent={selected.parentId ? page.objects[selected.parentId] : undefined}
+            onPickImage={(index) => { imageTarget.current = { nodeId: selected.id, index }; imageRef.current?.click(); }}
             onChange={(patch) => setProperty(selected, patch)}
             onRotate={(degrees) => edit((current) => rotateShape(current, page.id, selected.id, degrees - rotationDegrees(selected.transform)), `${selected.id}:rotation`)}
             onOpenCode={() => setCodeOpen(true)}
@@ -477,7 +566,16 @@ export function App(): JSX.Element {
 
       {pendingFig ? <div className="modal-backdrop"><section className="import-modal"><header><strong>Figma 프레임 가져오기</strong><button aria-label="닫기" onClick={() => setPendingFig(null)}>×</button></header><p>{pendingFig.name}</p><label className="field full"><span>가져올 프레임의 Figma 링크 또는 node-id</span><input autoFocus placeholder="https://www.figma.com/design/...?node-id=779-23219" value={figInput} onChange={(event) => setFigInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void importPendingFig(); }} /></label><small>현재 프레임의 노드와 참조 컴포넌트를 로컬에서 읽습니다. 이미지·그라디언트·일부 벡터와 override의 표현은 아직 근사치입니다.</small><footer><button onClick={() => setPendingFig(null)}>취소</button><button className="primary" disabled={importing} onClick={() => void importPendingFig()}>{importing ? '가져오는 중…' : '가져오기'}</button></footer></section></div> : null}
 
+      {importReport ? <ImportReportModal report={importReport} onClose={() => setImportReport(null)} onDownload={() => download('import-report.json', JSON.stringify(importReport, null, 2), 'application/json')} /> : null}
+
       {codeOpen && exported ? <div className="modal-backdrop" onPointerDown={() => setCodeOpen(false)}><section className="code-modal" onPointerDown={(event) => event.stopPropagation()}><header><div><strong>{exported.name}.tsx</strong><span>선택한 요소의 React/TypeScript 초안</span></div><button aria-label="닫기" onClick={() => setCodeOpen(false)}>×</button></header><pre><code>{exported.code}</code></pre><footer><button onClick={() => void navigator.clipboard.writeText(exported.code).then(() => setNotice('코드를 복사했습니다.'))}>복사</button><button className="primary" onClick={() => download(`${exported.name}.tsx`, exported.code, 'text/plain')}>TSX 다운로드</button></footer></section></div> : null}
     </div>
   );
+}
+
+/** JSON 파일에 함께 저장된 이미지(assets: { id: { mime, base64 } })를 꺼낸다. 형식이 어긋난 항목은 건너뛴다. */
+function embeddedAssets(raw: string): AssetRecord[] {
+  const value = JSON.parse(raw) as { assets?: Record<string, { mime?: unknown; base64?: unknown }> };
+  if (!value.assets || typeof value.assets !== 'object') return [];
+  return Object.entries(value.assets).flatMap(([id, item]) => typeof item?.mime === 'string' && typeof item.base64 === 'string' ? [{ id, mime: item.mime, bytes: base64ToBytes(item.base64) }] : []);
 }

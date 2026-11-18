@@ -3,6 +3,8 @@ import { isContainer, type DesignNode, type NodeType, type Page } from './model'
 import { rotationDegrees } from './geometry';
 import { layerRows } from './selection';
 import { parseNumberInput } from './numberInput';
+import { EffectsSection, FillsSection, StrokesSection, TextSection } from './stylePanels';
+import { AutoLayoutSection, ConstraintsSection, SizingSection } from './layoutPanels';
 
 export type DropPosition = 'above' | 'below' | 'inside';
 
@@ -96,9 +98,12 @@ interface PropertiesPanelProps {
   onRotate: (degrees: number) => void;
   onOpenCode: () => void;
   onDelete: () => void;
+  onPickImage: (index: number) => void;
+  /** 레이아웃·제약 항목을 보여줄지 정하는 부모. 최상위 도형이면 없다. */
+  parent?: DesignNode;
 }
 
-export function PropertiesPanel({ node, onChange, onRotate, onOpenCode, onDelete }: PropertiesPanelProps): JSX.Element {
+export function PropertiesPanel({ node, parent, onChange, onRotate, onOpenCode, onDelete, onPickImage }: PropertiesPanelProps): JSX.Element {
   return (
     <div className="properties">
       <div className="selection-header"><span className="selection-icon">{nodeIcon(node)}</span><div><strong>{node.name}</strong><small>{node.sourceType ?? node.type}</small></div></div>
@@ -109,10 +114,15 @@ export function PropertiesPanel({ node, onChange, onRotate, onOpenCode, onDelete
         <label className="field"><span>회전</span><NumberField value={rotationDegrees(node.transform)} onCommit={onRotate} /></label>
       </div>
       <div className="section-title">표현</div>
-      {node.type !== 'group' ? <label className="field full"><span>{node.type === 'text' ? '글자색' : '채우기'}</span><div className="color-field"><input type="color" value={/^#[0-9a-f]{6}$/i.test(node.fill) ? node.fill : '#000000'} onChange={(event) => onChange({ fill: event.target.value })} /><input value={node.fill} onChange={(event) => onChange({ fill: event.target.value })} /></div></label> : null}
-      {node.layout ? <div className="import-detail">오토 레이아웃 {node.layout === 'VERTICAL' ? '세로' : node.layout === 'HORIZONTAL' ? '가로' : '그리드'} · 간격 {node.gap ?? 0}px</div> : null}
+      {node.type === 'frame' ? <AutoLayoutSection node={node} onChange={onChange} /> : null}
+      <SizingSection node={node} parent={parent} onChange={onChange} />
+      {parent?.type === 'frame' && !parent.layout ? <ConstraintsSection node={node} onChange={onChange} /> : null}
       {node.type === 'rectangle' || node.type === 'frame' ? <label className="field full"><span>모서리 반경</span><NumberField value={node.radius ?? 0} min={0} onCommit={(next) => onChange({ radius: next })} /></label> : null}
-      {node.type === 'text' ? <><label className="field full"><span>텍스트</span><textarea rows={3} value={node.text ?? ''} onChange={(event) => onChange({ text: event.target.value })} /></label><label className="field full"><span>글자 크기</span><NumberField value={node.fontSize ?? 18} min={1} onCommit={(next) => onChange({ fontSize: next })} /></label></> : null}
+      <label className="field full"><span>불투명도 (%)</span><NumberField value={Math.round((node.opacity ?? 1) * 100)} min={0} onCommit={(next) => onChange({ opacity: Math.min(100, next) / 100 })} /></label>
+      {node.type === 'text' ? <TextSection node={node} onChange={onChange} /> : null}
+      {node.type !== 'group' && node.type !== 'vector' ? <FillsSection node={node} title={node.type === 'text' ? '글자색' : '채우기'} onChange={onChange} onPickImage={onPickImage} /> : null}
+      {node.type !== 'text' && node.type !== 'vector' ? <StrokesSection node={node} onChange={onChange} /> : null}
+      <EffectsSection node={node} onChange={onChange} />
       <div className="section-title">내보내기</div><button className="wide-action" onClick={onOpenCode}>React 컴포넌트 보기 →</button>
       <button className="danger-link" onClick={onDelete}>요소 삭제</button>
     </div>

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { transformSync } from 'esbuild';
-import { parseDocument, sampleDocument, walkPage, type DesignDocument } from '../src/model';
+import { parseDocument, sampleDocument, solid, walkPage, type DesignDocument } from '../src/model';
 import { addShape, applyChanges, deleteShape, moveShapes, recordTransaction, reparentShape, replaceDocument, updateShape, MERGE_WINDOW_MS, type HistoryEntry, type Transaction } from '../src/changes';
 import { exportTsx } from '../src/export';
 
@@ -30,8 +30,9 @@ describe('document model v2', () => {
       { id: 'c', type: 'ellipse', name: 'C', parentId: null, x: 200, y: 0, width: 30, height: 30, fill: '#00ff00' }
     ] };
     const doc = parseDocument(JSON.stringify(v1));
-    expect(doc.version).toBe(2);
+    expect(doc.version).toBe(4);
     expect(doc.name).toBe('Old file');
+    expect(node(doc, 'b').fills).toEqual([{ type: 'solid', color: '#ff0000' }]);
     expect(page(doc).children).toEqual(['f', 'c']);
     expect(node(doc, 'f').children).toEqual(['a', 'b']);
     expect(node(doc, 'a')).toMatchObject({ parentId: 'f', x: 5, y: 6, text: 'Hi', fontSize: 14 });
@@ -80,12 +81,12 @@ describe('changes', () => {
 
   it('adds a shape on top of its parent and undoes it', () => {
     const doc = sampleDocument();
-    const tx = addShape(doc, PAGE, { id: 'new', type: 'rectangle', name: 'N', parentId: 'frame-1', x: 1, y: 1, width: 5, height: 5, fill: '#000' });
+    const tx = addShape(doc, PAGE, { id: 'new', type: 'rectangle', name: 'N', parentId: 'frame-1', x: 1, y: 1, width: 5, height: 5, fills: solid('#000000') });
     const { after, restored } = roundTrip(doc, tx);
     expect(node(after, 'frame-1').children!.at(-1)).toBe('new');
     expect(restored).toEqual(doc);
-    expect(() => addShape(doc, PAGE, { id: 'x', type: 'text', name: 'X', parentId: 'rect-1', x: 0, y: 0, width: 1, height: 1, fill: '#000' })).toThrow();
-    expect(() => addShape(doc, PAGE, { id: 'rect-1', type: 'text', name: 'X', parentId: null, x: 0, y: 0, width: 1, height: 1, fill: '#000' })).toThrow();
+    expect(() => addShape(doc, PAGE, { id: 'x', type: 'text', name: 'X', parentId: 'rect-1', x: 0, y: 0, width: 1, height: 1, fills: solid('#000000') })).toThrow();
+    expect(() => addShape(doc, PAGE, { id: 'rect-1', type: 'text', name: 'X', parentId: null, x: 0, y: 0, width: 1, height: 1, fills: solid('#000000') })).toThrow();
   });
 
   it('updates only changed attributes and removes added ones on undo', () => {
@@ -156,7 +157,7 @@ describe('React export', () => {
   it('emits SVG paths for an imported vector', () => {
     const base = sampleDocument();
     const doc = applyChanges(base, addShape(base, PAGE, { id: 'vector-1', parentId: null, type: 'vector', name: 'Icon', x: 0, y: 0,
-      width: 10, height: 10, fill: 'transparent', vectorPaths: [{ d: 'M0 0 L10 10', fill: 'none', stroke: '#123456', strokeWidth: 2 }] }).redo);
+      width: 10, height: 10, fills: [], vectorPaths: [{ d: 'M0 0 L10 10', fill: 'none', stroke: '#123456', strokeWidth: 2 }] }).redo);
     const code = exportTsx(page(doc), 'vector-1').code;
     expect(code).toContain('<svg');
     expect(code).toContain('M0 0 L10 10');
