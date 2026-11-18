@@ -20,7 +20,8 @@ interface LocalChild { node: DesignNode; bounds: Box; rotated: boolean }
 function localChild(child: DesignNode, toLocal: Matrix, containerLinear: Matrix): LocalChild {
   const bounds = boundsOf(worldCorners(child).map((point) => applyPoint(toLocal, point)));
   const relative = multiply(invert(containerLinear), linearPart(child.transform));
-  const rotated = Math.abs(relative[0] - 1) > 1e-6 || Math.abs(relative[3] - 1) > 1e-6 || Math.abs(relative[1]) > 1e-6 || Math.abs(relative[2]) > 1e-6;
+  // 뒤집기(대각 성분 ±1)는 가로·세로 축이 그대로라 채우기·맞춤 크기를 유지한다. 축이 기울어진 회전만 크기를 고정한다.
+  const rotated = Math.abs(Math.abs(relative[0]) - 1) > 1e-6 || Math.abs(Math.abs(relative[3]) - 1) > 1e-6 || Math.abs(relative[1]) > 1e-6 || Math.abs(relative[2]) > 1e-6;
   return { node: child, bounds, rotated };
 }
 

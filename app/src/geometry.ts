@@ -49,9 +49,19 @@ export function cleanMatrix(m: Matrix): Matrix {
   return m.map((value) => (Math.abs(value) < 1e-10 ? 0 : Math.round(value * 1e10) / 1e10)) as Matrix;
 }
 
+/**
+ * 행렬의 회전각. 뒤집힌 행렬(행렬식 < 0)은 '회전 × 좌우 반전'으로 보고 반전을 뺀 회전각을 돌려준다.
+ * 그래야 좌우로만 뒤집은 도형이 180도로 보이지 않고, 회전 입력도 반전을 유지한 채 동작한다.
+ */
 export function rotationDegrees(m: Matrix): number {
-  const degrees = (Math.atan2(m[1], m[0]) * 180) / Math.PI;
-  return Math.round(degrees * 100) / 100;
+  const flipped = isFlipped(m);
+  const degrees = (Math.atan2(flipped ? -m[1] : m[1], flipped ? -m[0] : m[0]) * 180) / Math.PI;
+  return Math.round(degrees * 100) / 100 || 0;
+}
+
+/** 좌우나 상하로 뒤집힌(거울상) 행렬인지. 상하 반전은 좌우 반전 + 180도 회전과 같다. */
+export function isFlipped(m: Matrix): boolean {
+  return m[0] * m[3] - m[1] * m[2] < 0;
 }
 
 export function center(box: Box): Point {

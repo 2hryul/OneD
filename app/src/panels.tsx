@@ -34,13 +34,31 @@ export function NumberField({ value, min, onCommit }: { value: number; min?: num
   }} />;
 }
 
-interface PagesPanelProps { pages: readonly Page[]; currentId: string; onSwitch: (id: string) => void; onAdd: () => void }
+interface PagesPanelProps {
+  pages: readonly Page[];
+  currentId: string;
+  onSwitch: (id: string) => void;
+  onAdd: () => void;
+  onRename: (id: string, name: string) => void;
+  onDelete: (id: string) => void;
+}
 
-export function PagesPanel({ pages, currentId, onSwitch, onAdd }: PagesPanelProps): JSX.Element {
+/** 페이지 목록. 이름을 더블클릭해 바꾸고, 올리면 보이는 ×로 지운다(되돌리기 가능). 한 페이지만 남으면 지우기 버튼을 감춘다. */
+export function PagesPanel({ pages, currentId, onSwitch, onAdd, onRename, onDelete }: PagesPanelProps): JSX.Element {
+  const [renaming, setRenaming] = useState<string | null>(null);
   return (
     <div className="pages">
       <div className="pages-heading"><strong>페이지</strong><button title="페이지 추가" aria-label="페이지 추가" onClick={onAdd}>+</button></div>
-      {pages.map((page) => <button key={page.id} className={`page-row ${page.id === currentId ? 'active' : ''}`} onClick={() => onSwitch(page.id)}>{page.name}</button>)}
+      {pages.map((page) => (
+        <div key={page.id} className={`page-row ${page.id === currentId ? 'active' : ''}`} onClick={() => onSwitch(page.id)}>
+          {renaming === page.id
+            ? <input className="layer-rename" autoFocus defaultValue={page.name} aria-label="페이지 이름" onClick={(event) => event.stopPropagation()} onFocus={(event) => event.currentTarget.select()}
+              onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur(); if (event.key === 'Escape') { event.currentTarget.value = page.name; event.currentTarget.blur(); } }}
+              onBlur={(event) => { onRename(page.id, event.currentTarget.value); setRenaming(null); }} />
+            : <span className="page-name" title="더블클릭해 이름 바꾸기" onDoubleClick={(event) => { event.stopPropagation(); setRenaming(page.id); }}>{page.name}</span>}
+          {pages.length > 1 && renaming !== page.id ? <button className="page-delete" title="페이지 지우기" aria-label={`${page.name} 페이지 지우기`} onClick={(event) => { event.stopPropagation(); onDelete(page.id); }}>×</button> : null}
+        </div>
+      ))}
     </div>
   );
 }

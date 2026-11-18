@@ -11,7 +11,7 @@ export interface StoredFile {
   doc: DesignDocument; comments: CommentThread[]; versions: Array<VersionInfo & { doc: DesignDocument }>;
 }
 
-const CHANGE_TYPES = new Set(['addObj', 'modObj', 'delObj', 'movObjects', 'addPage', 'delPage', 'setComponent', 'delComponent', 'setToken', 'delToken', 'setDocument']);
+const CHANGE_TYPES = new Set(['addObj', 'modObj', 'delObj', 'movObjects', 'addPage', 'delPage', 'modPage', 'setComponent', 'delComponent', 'setToken', 'delToken', 'setDocument']);
 const MAX_CHANGES = 50_000;
 const MAX_VERSIONS = 30;
 

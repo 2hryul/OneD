@@ -1,5 +1,5 @@
 import { variantName, walkPage, type Component, type DesignDocument, type DesignNode, type Page } from './model';
-import { rotationDegrees } from './geometry';
+import { applyPoint, center, invert, isFlipped, linearPart, multiply, rotationDegrees, worldMatrix } from './geometry';
 import { fontStack, pathPaint, paintsToBackground, strokeAndEffectCss, textCss } from './styleCss';
 import { pathToD } from './path';
 
@@ -26,7 +26,11 @@ function propertyName(node: DesignNode, index: number): string {
 function placement(node: DesignNode, parent: DesignNode | null): Style {
   if (!parent) return { position: 'relative', width: node.width, height: node.height, boxSizing: 'border-box' };
   const inFlow = Boolean(parent.layout) && !node.item?.absolute;
-  if (!inFlow) return { position: 'absolute', left: round(node.x - parent.x), top: round(node.y - parent.y), width: node.width, height: node.height, boxSizing: 'border-box' };
+  if (!inFlow) {
+    // 부모의 지역 좌표로 옮긴다. 부모 div가 자기 회전·반전을 CSS로 다시 적용하므로, 페이지 좌표 차이를 그대로 쓰면 두 번 적용된다.
+    const local = applyPoint(invert(worldMatrix(parent)), center(node));
+    return { position: 'absolute', left: round(local.x - node.width / 2), top: round(local.y - node.height / 2), width: node.width, height: node.height, boxSizing: 'border-box' };
+  }
   const row = parent.layout!.direction === 'row';
   const style: Style = { position: 'relative', boxSizing: 'border-box', flexShrink: 0 };
   const sizes = { h: node.item?.h ?? 'fix', v: node.item?.v ?? 'fix' };
@@ -62,8 +66,11 @@ function styleFor(node: DesignNode, parent: DesignNode | null): Style {
   if (node.type === 'ellipse') style.borderRadius = '50%';
   if (node.radius) style.borderRadius = node.radius;
   if (node.type === 'frame' && node.clipContent !== false) style.overflow = 'hidden';
-  const degrees = rotationDegrees(node.transform);
-  if (degrees) style.transform = `rotate(${degrees}deg)`;
+  // CSS 변환은 부모 변환 위에 쌓이므로 부모에 대한 상대 행렬만 쓴다. 뒤집힌 도형은 회전 뒤 좌우 반전으로 쓴다(rotationDegrees가 반전을 뺀 각도를 준다).
+  const relative = parent ? multiply(invert(linearPart(parent.transform)), linearPart(node.transform)) : node.transform;
+  const degrees = rotationDegrees(relative);
+  const turns = [degrees ? `rotate(${degrees}deg)` : '', isFlipped(relative) ? 'scaleX(-1)' : ''].filter(Boolean);
+  if (turns.length) style.transform = turns.join(' ');
   if (node.type === 'text') {
     Object.assign(style, textCss(node), { display: 'flex', flexDirection: 'column', whiteSpace: 'pre-wrap' });
     style.fontSize = node.fontSize ?? 18;

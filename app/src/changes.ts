@@ -17,6 +17,7 @@ export type Change =
   | { type: 'movObjects'; pageId: string; ids: string[]; parentId: string | null; index: number }
   | { type: 'addPage'; page: Page; index: number }
   | { type: 'delPage'; pageId: string }
+  | { type: 'modPage'; pageId: string; name: string }
   | { type: 'setComponent'; component: Component }
   | { type: 'delComponent'; id: string }
   | { type: 'setToken'; token: Token }
@@ -61,11 +62,19 @@ export function applyChanges(doc: DesignDocument, changes: readonly Change[]): D
     if (change.type === 'delComponent') { const { [change.id]: _removed, ...rest } = base.components; void _removed; base = { ...base, components: rest }; continue; }
     if (change.type === 'setToken') { base = { ...base, tokens: { ...base.tokens, [change.token.id]: change.token } }; continue; }
     if (change.type === 'delToken') { const { [change.id]: _removed, ...rest } = base.tokens; void _removed; base = { ...base, tokens: rest }; continue; }
+    if (change.type === 'modPage') { base = withPageRenamed(base, drafts.get(change.pageId), change.pageId, change.name); continue; }
     if (change.type === 'delPage') { base = { ...base, pages: base.pages.filter((page) => page.id !== change.pageId) }; drafts.delete(change.pageId); continue; }
     applyToPage(draftPage(change.pageId), change);
   }
   if (drafts.size === 0) return base;
   return { ...base, pages: base.pages.map((page) => drafts.get(page.id) ?? page) };
+}
+
+/** 페이지 이름 바꾸기. 같은 호출에서 이미 복사한 페이지(draft)가 있으면 그쪽도 바꾼다. 끝에서 draft가 원본을 덮어쓰기 때문이다. */
+function withPageRenamed(doc: DesignDocument, draft: Page | undefined, pageId: string, name: string): DesignDocument {
+  if (!doc.pages.some((page) => page.id === pageId)) throw new Error(`[applyChanges] 페이지 없음 - ${pageId}`);
+  if (draft) draft.name = name;
+  return { ...doc, pages: doc.pages.map((page) => (page.id === pageId ? { ...page, name } : page)) };
 }
 
 function withPageAdded(doc: DesignDocument, page: Page, index: number): DesignDocument {
@@ -316,17 +325,43 @@ export function topLevelIds(page: Page, ids: readonly string[]): string[] {
 export function rotateShape(doc: DesignDocument, pageId: string, id: string, degrees: number): Transaction {
   if (!degrees) return EMPTY_TRANSACTION;
   const page = findPage(doc, pageId);
-  const pivot = center(findNode(page, id));
-  const turn = rotation(degrees);
-  const nodes = walkPage(page, [id]);
+  return transformAround(page, [id], center(findNode(page, id)), rotation(degrees));
+}
+
+export type FlipAxis = 'horizontal' | 'vertical';
+
+/**
+ * 고른 도형들을 좌우(horizontal) 또는 상하(vertical)로 뒤집는다. 기준은 선택 영역 전체의 가운데다(Figma와 같음).
+ * 도형 상자는 그대로 두고 transform 행렬에 반전을 곱하므로, 두 번 뒤집으면 원래 행렬로 돌아온다.
+ */
+export function flipShapes(doc: DesignDocument, pageId: string, ids: readonly string[], axis: FlipAxis): Transaction {
+  const page = doc.pages.find((item) => item.id === pageId);
+  if (!page) return EMPTY_TRANSACTION;
+  const roots = topLevelIds(page, ids);
+  if (roots.length === 0) return EMPTY_TRANSACTION;
+  const bounds = boundsOf(roots.flatMap((id) => worldCorners(page.objects[id]!)));
+  const mirror: Matrix = axis === 'horizontal' ? [-1, 0, 0, 1, 0, 0] : [1, 0, 0, -1, 0, 0];
+  // 반전은 좌표를 정확히 되돌릴 수 있으므로 0.01이 아니라 부동소수 잔여값만 지운다. 두 번 뒤집으면 원래 값(예: 210.333)으로 돌아와야 한다.
+  return transformAround(page, roots, { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 }, mirror, cleanBox);
+}
+
+/**
+ * 도형과 하위 도형 전체에 pivot 기준 선형 변환(회전·반전)을 적용한다.
+ * 좌표가 절대값이라 하위 도형도 중심을 같은 변환으로 옮기고 각자의 행렬에 같은 변환을 곱한다.
+ */
+const cleanBox = (rect: Rect): Rect => ({ x: Math.round(rect.x * 1e6) / 1e6, y: Math.round(rect.y * 1e6) / 1e6, width: rect.width, height: rect.height });
+
+/** snap: 옮긴 상자를 다듬는 방식. 회전은 0.01 단위(roundRect), 반전은 부동소수 잔여값만(cleanBox). */
+function transformAround(page: Page, ids: readonly string[], pivot: { x: number; y: number }, linear: Matrix, snap: (rect: Rect) => Rect = roundRect): Transaction {
+  const nodes = walkPage(page, [...ids]);
   return {
     redo: nodes.map((node): Change => {
       const c = center(node);
-      const v = applyVector(turn, { x: c.x - pivot.x, y: c.y - pivot.y });
-      const box = roundRect({ x: pivot.x + v.x - node.width / 2, y: pivot.y + v.y - node.height / 2, width: node.width, height: node.height });
-      return { type: 'modObj', pageId, id: node.id, set: { x: box.x, y: box.y, transform: cleanMatrix(multiply(turn, node.transform)) } };
+      const v = applyVector(linear, { x: c.x - pivot.x, y: c.y - pivot.y });
+      const box = snap({ x: pivot.x + v.x - node.width / 2, y: pivot.y + v.y - node.height / 2, width: node.width, height: node.height });
+      return { type: 'modObj', pageId: page.id, id: node.id, set: { x: box.x, y: box.y, transform: cleanMatrix(multiply(linear, node.transform)) } };
     }),
-    undo: nodes.map((node): Change => ({ type: 'modObj', pageId, id: node.id, set: { x: node.x, y: node.y, transform: node.transform } }))
+    undo: nodes.map((node): Change => ({ type: 'modObj', pageId: page.id, id: node.id, set: { x: node.x, y: node.y, transform: node.transform } }))
   };
 }
 
@@ -419,6 +454,28 @@ export function ungroupShape(doc: DesignDocument, pageId: string, groupId: strin
 
 export function addPage(doc: DesignDocument, page: Page, index = doc.pages.length): Transaction {
   return { redo: [{ type: 'addPage', page, index }], undo: [{ type: 'delPage', pageId: page.id }] };
+}
+
+/** 페이지 이름 바꾸기. 앞뒤 공백을 지우고 200자로 자른다. 비었거나 그대로면 변경 없음. */
+export function renamePage(doc: DesignDocument, pageId: string, name: string): Transaction {
+  const page = doc.pages.find((item) => item.id === pageId);
+  const clean = name.trim().slice(0, 200);
+  if (!page || !clean || clean === page.name) return EMPTY_TRANSACTION;
+  return { redo: [{ type: 'modPage', pageId, name: clean }], undo: [{ type: 'modPage', pageId, name: page.name }] };
+}
+
+/**
+ * 페이지 지우기. 되돌리면 같은 자리에 페이지 전체가 돌아온다.
+ * 마지막 한 페이지와, 컴포넌트 원본이 있는 페이지는 지우지 않는다. 원본이 사라지면 다른 페이지의 인스턴스가 가리킬 곳이 없어 문서 검사를 통과하지 못한다.
+ */
+export function deletePage(doc: DesignDocument, pageId: string): Transaction {
+  const index = doc.pages.findIndex((item) => item.id === pageId);
+  if (index < 0) return EMPTY_TRANSACTION;
+  if (doc.pages.length === 1) throw new Error('[deletePage] 페이지 지우기 실패 - 마지막 한 페이지는 지울 수 없습니다.');
+  const mains = Object.values(doc.components).filter((component) => component.pageId === pageId);
+  if (mains.length) throw new Error(`[deletePage] 페이지 지우기 실패 - 컴포넌트 원본(${mains.map((component) => component.name).slice(0, 3).join(', ')})이 있습니다. 원본을 다른 페이지로 옮기거나 지운 뒤 다시 하세요.`);
+  const page = doc.pages[index]!;
+  return { redo: [{ type: 'delPage', pageId }], undo: [{ type: 'addPage', page, index }] };
 }
 
 /**

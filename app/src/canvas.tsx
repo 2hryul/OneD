@@ -2,6 +2,7 @@ import { createContext, memo, useContext, useLayoutEffect, useState, useSyncExte
 import { IDENTITY, type DesignNode, type Matrix, type Page } from './model';
 import { HANDLES, boundsOf, cssMatrix, handlePoint, invert, multiply, worldCorners, worldMatrix, type Handle, type Rect } from './geometry';
 import type { Guide } from './snapping';
+import type { Measure } from './measure';
 import { fontStack, pathPaint, paintsToBackground, strokeAndEffectCss, textCss, textRuns, type AssetResolver } from './styleCss';
 import { pathToD } from './path';
 
@@ -157,6 +158,8 @@ interface OverlayProps {
   visible: Rect;
   /** false면 프레임 이름표를 그리지 않는다(Canvas 렌더러가 직접 그린다). */
   titles?: boolean;
+  /** Alt를 누른 채 올린 도형의 상자와, 고른 영역에서 그 도형까지의 거리선. */
+  measure?: { target: Rect; lines: readonly Measure[] } | null;
 }
 
 /** 보이는 영역을 화면 절반 크기 격자에 맞춰 조금 넓힌다. 조금 움직일 때는 같은 값이 나와 이름표를 다시 그리지 않는다. */
@@ -168,7 +171,7 @@ function snapView(visible: Rect): [number, number, number, number] {
 }
 
 /** 선택 상자, 크기·회전 핸들, 정렬선, 사각형 선택 영역, 최상위 프레임 이름을 도형 위에 그린다. 굵기는 확대율과 상관없이 화면 기준으로 일정하게 맞춘다. */
-export function SelectionOverlay({ page, selectedIds, editingId, zoom, guides, marquee, visible, titles = true }: OverlayProps): JSX.Element {
+export function SelectionOverlay({ page, selectedIds, editingId, zoom, guides, marquee, visible, titles = true, measure = null }: OverlayProps): JSX.Element {
   const [left, top, right, bottom] = snapView(visible);
   const unit = 1 / zoom;
   const nodes = selectedIds.map((id) => page.objects[id]).filter((node): node is DesignNode => Boolean(node && !node.hidden));
@@ -180,6 +183,7 @@ export function SelectionOverlay({ page, selectedIds, editingId, zoom, guides, m
       {nodes.length > 1 ? <MultiBox nodes={nodes} unit={unit} /> : null}
       {single ? <Handles node={single} unit={unit} /> : null}
       {guides.map((guide, index) => <div key={index} className="guide" style={guide.axis === 'x' ? { left: guide.at, top: guide.from, width: unit, height: guide.to - guide.from } : { left: guide.from, top: guide.at, width: guide.to - guide.from, height: unit }} />)}
+      {measure ? <MeasureLines target={measure.target} lines={measure.lines} unit={unit} /> : null}
       {marquee ? <div className="marquee" style={{ left: marquee.x, top: marquee.y, width: marquee.width, height: marquee.height, borderWidth: unit }} /> : null}
     </div>
   );
@@ -195,6 +199,26 @@ const FrameTitles = memo(function FrameTitles({ page, left, top, right, bottom }
 function FrameTitle({ frame }: { frame: DesignNode }): JSX.Element {
   const bounds = boundsOf(worldCorners(frame));
   return <div data-node-id={frame.id} className="frame-title" style={{ left: bounds.x, top: bounds.y, transform: 'translateY(-100%) scale(var(--unit))' }}>{frame.name}</div>;
+}
+
+/** 거리선과 숫자. 선 굵기와 글자 크기는 확대율과 상관없이 화면 기준으로 같게 둔다. */
+function MeasureLines({ target, lines, unit }: { target: Rect; lines: readonly Measure[]; unit: number }): JSX.Element {
+  return (
+    <>
+      <div className="measure-target" style={{ left: target.x, top: target.y, width: target.width, height: target.height, borderWidth: unit }} />
+      {lines.map((line, index) => {
+        const box = line.axis === 'x' ? { left: line.from, top: line.at - unit / 2, width: line.to - line.from, height: unit } : { left: line.at - unit / 2, top: line.from, width: unit, height: line.to - line.from };
+        const middle = (line.from + line.to) / 2;
+        const label = line.axis === 'x' ? { left: middle, top: line.at } : { left: line.at, top: middle };
+        return (
+          <div key={index}>
+            <div className="measure-line" style={box} />
+            <span className="measure-label" style={{ ...label, transform: `scale(${unit}) ${line.axis === 'x' ? 'translate(-50%, 4px)' : 'translate(6px, -50%)'}`, transformOrigin: '0 0' }}>{line.value}</span>
+          </div>
+        );
+      })}
+    </>
+  );
 }
 
 function MultiBox({ nodes, unit }: { nodes: readonly DesignNode[]; unit: number }): JSX.Element {

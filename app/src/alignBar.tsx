@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { AlignMode, DistributeAxis } from './align';
+import type { FlipAxis } from './changes';
 import type { ImageFormat } from './imageExport';
 
 const ALIGN_BUTTONS: Array<[AlignMode, string, string]> = [
@@ -8,13 +9,16 @@ const ALIGN_BUTTONS: Array<[AlignMode, string, string]> = [
 ];
 
 /** 정렬·간격 버튼 줄. 하나만 골랐으면 부모 프레임 기준이고, 간격 맞추기는 셋 이상일 때만 켠다. */
-export function AlignBar({ count, onAlign, onDistribute }: { count: number; onAlign: (mode: AlignMode) => void; onDistribute: (axis: DistributeAxis) => void }): JSX.Element {
+export function AlignBar({ count, onAlign, onDistribute, onFlip }: { count: number; onAlign: (mode: AlignMode) => void; onDistribute: (axis: DistributeAxis) => void; onFlip: (axis: FlipAxis) => void }): JSX.Element {
   return (
     <div className="align-bar" role="toolbar" aria-label="정렬">
       {ALIGN_BUTTONS.map(([mode, icon, label]) => <button key={mode} title={label} aria-label={label} onClick={() => onAlign(mode)}>{icon}</button>)}
       <span className="align-divider" />
       <button title="가로 간격 맞추기 (Alt+Shift+H)" aria-label="가로 간격 맞추기" disabled={count < 3} onClick={() => onDistribute('horizontal')}>⋯</button>
       <button title="세로 간격 맞추기 (Alt+Shift+V)" aria-label="세로 간격 맞추기" disabled={count < 3} onClick={() => onDistribute('vertical')}>⋮</button>
+      <span className="align-divider" />
+      <button title="좌우 뒤집기 (Shift+H)" aria-label="좌우 뒤집기" onClick={() => onFlip('horizontal')}>⇋</button>
+      <button title="상하 뒤집기 (Shift+V)" aria-label="상하 뒤집기" onClick={() => onFlip('vertical')}>⇵</button>
     </div>
   );
 }

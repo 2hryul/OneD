@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ChangeEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import { emptyPage, isContainer, parseDocument, solid, walkPage, type BoolOp, type DesignDocument, type DesignNode, type Matrix, type NodeInput, type Page, type Paint, type SubPath } from './model';
 import {
-  EMPTY_TRANSACTION, addPage, addShape, applyChanges, childrenOf, composeTransactions, createBoolean, deleteShapes, fitPathBounds, flattenToPath, groupShapes, moveMany,
-  recordTransaction, removeToken, reparentShape, replaceDocument, setToken, resizeShape, rotateShape, topLevelIds, ungroupShape, updateShape,
-  type HistoryEntry, type Transaction
+  EMPTY_TRANSACTION, addPage, addShape, deletePage, renamePage, applyChanges, childrenOf, composeTransactions, createBoolean, deleteShapes, fitPathBounds, flattenToPath, groupShapes, moveMany,
+  flipShapes, recordTransaction, removeToken, reparentShape, replaceDocument, setToken, resizeShape, rotateShape, topLevelIds, ungroupShape, updateShape,
+  type FlipAxis, type HistoryEntry, type Transaction
 } from './changes';
 import { applyPoint, boundsOf, center, invert, resizeBox, rotationDegrees, worldCorners, worldMatrix, type Handle, type Point, type Rect } from './geometry';
 import { insertPoint, nearestSegment } from './path';
@@ -24,6 +24,7 @@ import { AlignBar, ExportImageRow, type ExportChoice } from './alignBar';
 import { exportImage, safeFileName } from './imageExport';
 import { reorderNodes, type ReorderMode } from './arrange';
 import { Rulers } from './rulers';
+import { measureBetween } from './measure';
 import type { PluginHost, PluginInfo } from './pluginApi';
 import { LayersPanel, PagesPanel, PropertiesPanel, type DropPosition } from './panels';
 import { exportTsx } from './export';
@@ -174,6 +175,9 @@ export function App(): JSX.Element {
   const [pan, setPan] = useState({ x: 170, y: 92 });
   const panRef = useRef(pan);
   const [guides, setGuides] = useState<Guide[]>([]);
+  /** Alt를 누른 채 마우스를 올린 도형. 고른 영역에서 이 도형까지 거리를 보여 준다. */
+  const [measureId, setMeasureId] = useState<string | null>(null);
+  const lastHover = useRef<{ element: HTMLElement; point: Point } | null>(null);
   const [marquee, setMarquee] = useState<Rect | null>(null);
   const [codeOpen, setCodeOpen] = useState(false);
   const [pendingFig, setPendingFig] = useState<File | null>(null);
@@ -503,6 +507,12 @@ export function App(): JSX.Element {
       .catch((error: unknown) => setNotice(message(error)));
   };
 
+  /** 좌우·상하 뒤집기. 잠긴 도형은 건너뛴다(방향키 이동과 같음). */
+  const flipSelection = (axis: FlipAxis): void => {
+    const ids = topLevelIds(page, liveSelection).filter((id) => !page.objects[id]?.locked);
+    edit((current) => flipShapes(current, page.id, ids, axis));
+  };
+
   const reorderSelection = (mode: ReorderMode): void => { edit((current) => reorderNodes(current, page.id, liveSelection, mode)); };
 
   /**
@@ -572,6 +582,8 @@ export function App(): JSX.Element {
       if (event.code === 'Space' && !event.repeat) { setSpaceHeld(true); if (!editing) event.preventDefault(); }
       if (editing) return;
       const mod = event.ctrlKey || event.metaKey;
+      // Alt를 누르는 순간에도 거리가 보이게 마지막 마우스 위치로 바로 잰다. 브라우저 메뉴로 초점이 가지 않게 막는다.
+      if (event.key === 'Alt') { event.preventDefault(); const hover = lastHover.current; if (hover && tool === 'select' && !drag.current) setMeasureId(measureTargetAt(hover.element, hover.point)); return; }
       const key = event.key.toLowerCase();
       if (pen && onPenKey(event)) return;
       if (pathEdit && onPathEditKey(event)) return;
@@ -603,6 +615,8 @@ export function App(): JSX.Element {
       if (mod && key === '-') { event.preventDefault(); zoomAtCenter((value) => value / 1.25); return; }
       if (event.shiftKey && !mod && !event.altKey && (event.code === 'Digit1' || event.key === '!')) { event.preventDefault(); fitCanvas(page); return; }
       if (event.shiftKey && !mod && !event.altKey && (event.code === 'Digit2' || event.key === '@') && liveSelection.length) { event.preventDefault(); zoomToRect(boundsOfIds(page, liveSelection), 4); return; }
+      // Shift+H는 손 도구(H)보다 먼저 본다. 고른 것이 없으면 아래 도구 단축키로 넘어가지 않고 끝낸다.
+      if (event.shiftKey && !mod && !event.altKey && (key === 'h' || key === 'v')) { event.preventDefault(); if (liveSelection.length) flipSelection(key === 'h' ? 'horizontal' : 'vertical'); return; }
       if (ARROWS[event.key] && !mod && !event.altKey && liveSelection.length) { event.preventDefault(); nudgeSelection(event.key, event.shiftKey ? 10 : 1); return; }
       if (event.key === 'Delete' || event.key === 'Backspace') { event.preventDefault(); deleteSelection(); return; }
       if (event.key === 'Escape') { setTool('select'); setSelectedIds([]); return; }
@@ -610,7 +624,7 @@ export function App(): JSX.Element {
       const match = TOOLS.find((item) => item.shortcut.toLowerCase() === key);
       if (match) setTool(match.id);
     };
-    const onKeyUp = (event: KeyboardEvent): void => { if (event.code === 'Space') setSpaceHeld(false); };
+    const onKeyUp = (event: KeyboardEvent): void => { if (event.code === 'Space') setSpaceHeld(false); if (event.key === 'Alt') setMeasureId(null); };
     window.addEventListener('keydown', onKeyDown); window.addEventListener('keyup', onKeyUp);
     return () => { window.removeEventListener('keydown', onKeyDown); window.removeEventListener('keyup', onKeyUp); };
   });
@@ -655,6 +669,35 @@ export function App(): JSX.Element {
   /** 누른 도형 id. DOM 렌더러는 요소에서, Canvas 렌더러는 도형 모양으로 찾는다. 프레임 이름표 같은 DOM 위층이 먼저다. */
   const hitAt = (element: HTMLElement, point: Point): string | undefined =>
     element.closest<HTMLElement>('[data-node-id]')?.dataset.nodeId ?? (useCanvas ? frameTitleAt(page, point, 1 / zoom, TITLE_HEIGHT) ?? hitTest(page, point) ?? undefined : undefined);
+
+  /**
+   * 거리를 잴 대상. 고른 도형(과 그 하위) 위에서는 부모 프레임까지 재고(Figma와 같음), 그 밖에서는 마우스 아래 도형까지 잰다.
+   * 고른 것이 없거나 아무것도 없는 곳이면 null.
+   */
+  const measureTargetAt = (element: HTMLElement, point: Point): string | null => {
+    const roots = topLevelIds(page, liveSelection);
+    // 선택 상자의 크기 핸들 위도 고른 도형 위로 본다.
+    const hit = !roots.length ? undefined : element.closest('[data-handle]') ? roots[0] : hitAt(element, point);
+    if (!hit || !page.objects[hit]) return null;
+    if (!subtreeIds(page, roots).has(hit)) return hit;
+    return page.objects[roots[0]!]?.parentId ?? null;
+  };
+
+  const onViewportMove = (event: ReactPointerEvent<HTMLDivElement>): void => {
+    const world = toWorld(event.clientX, event.clientY);
+    if (pen && !drag.current) setPenCursor(world);
+    collab.session.current?.cursor(page.id, world.x, world.y);
+    lastHover.current = { element: event.target as HTMLElement, point: world };
+    const next = event.altKey && tool === 'select' && !drag.current ? measureTargetAt(event.target as HTMLElement, world) : null;
+    if (next !== measureId) setMeasureId(next);
+  };
+
+  const measure = (() => {
+    const target = measureId ? page.objects[measureId] : undefined;
+    if (!target || liveSelection.length === 0) return null;
+    const box = boundsOf(worldCorners(target));
+    return { target: box, lines: measureBetween(boundsOfIds(page, liveSelection), box) };
+  })();
 
   const onCanvasDown = (event: ReactPointerEvent<HTMLDivElement>): void => {
     if (event.button === 1 || tool === 'hand' || spaceHeldRef.current) { startPan(event); return; }
@@ -932,6 +975,16 @@ export function App(): JSX.Element {
     if (edit((current) => addPage(current, emptyPage(id, `Page ${current.pages.length + 1}`)))) { setPageId(id); setSelectedIds([]); }
   };
 
+  /** 페이지를 지우고, 보던 페이지였으면 바로 옆 페이지로 옮겨 간다. */
+  const removePage = (id: string): void => {
+    const pages = docRef.current.pages;
+    const index = pages.findIndex((item) => item.id === id);
+    const neighbor = pages[index + 1] ?? pages[index - 1];
+    if (!edit((current) => deletePage(current, id))) return;
+    setNotice(`'${pages[index]?.name ?? ''}' 페이지를 지웠습니다. Ctrl+Z로 되돌릴 수 있습니다.`);
+    if (id === page.id && neighbor) switchPage(neighbor.id);
+  };
+
   const openFile = async (event: ChangeEvent<HTMLInputElement>): Promise<void> => {
     const file = event.target.files?.[0]; if (!file) return;
     // 공유 파일 위에 다른 파일을 열면 모든 참여자의 문서가 바뀐다. 공유 파일을 닫고 로컬 문서로 연다.
@@ -1019,7 +1072,7 @@ export function App(): JSX.Element {
 
       <div className="workspace">
         <aside className="left-panel">
-          <PagesPanel pages={doc.pages} currentId={page.id} onSwitch={switchPage} onAdd={addNewPage} />
+          <PagesPanel pages={doc.pages} currentId={page.id} onSwitch={switchPage} onAdd={addNewPage} onRename={(id, name) => edit((current) => renamePage(current, id, name))} onDelete={removePage} />
           <div className="panel-heading panel-tabs">
             <button className={leftTab === 'layers' ? 'active' : ''} onClick={() => setLeftTab('layers')}>레이어 <span>{shapeCount}</span></button>
             <button className={leftTab === 'assets' ? 'active' : ''} onClick={() => setLeftTab('assets')}>에셋 <span>{Object.keys(doc.components).length}</span></button>
@@ -1035,13 +1088,13 @@ export function App(): JSX.Element {
 
         <main className="canvas-area">
           <Rulers pan={pan} zoom={zoom} width={viewportSize.width} height={viewportSize.height} selection={liveSelection.length ? boundsOfIds(page, liveSelection) : null} />
-          <div className="canvas-viewport" ref={viewportRef} onPointerDown={onCanvasDown} onDoubleClick={onCanvasDoubleClick} onPointerMove={(event) => { const world = toWorld(event.clientX, event.clientY); if (pen && !drag.current) setPenCursor(world); collab.session.current?.cursor(page.id, world.x, world.y); }} style={{ cursor: tool === 'hand' || spaceHeld ? 'grab' : tool === 'select' ? 'default' : 'crosshair' }}>
+          <div className="canvas-viewport" ref={viewportRef} onPointerDown={onCanvasDown} onDoubleClick={onCanvasDoubleClick} onPointerMove={onViewportMove} style={{ cursor: tool === 'hand' || spaceHeld ? 'grab' : tool === 'select' ? 'default' : 'crosshair' }}>
             {useCanvas ? <CanvasView page={page} pan={pan} zoom={zoom} editingId={editingId} resolveAsset={resolveAsset} /> : null}
             <div className="canvas-world" style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`, '--unit': 1 / zoom } as CSSProperties}>
               {useCanvas
                 ? (editingId && page.objects[editingId] ? <TextEditOverlay node={page.objects[editingId]!} onDone={finishText} /> : null)
                 : <CanvasNodes page={page} editingId={editingId} onTextDone={finishText} resolveAsset={resolveAsset} />}
-              <SelectionOverlay page={page} selectedIds={liveSelection} editingId={pathEdit?.id ?? editingId} zoom={zoom} guides={guides} marquee={marquee} titles={!useCanvas} visible={{ x: -pan.x / zoom, y: -pan.y / zoom, width: viewportSize.width / zoom, height: viewportSize.height / zoom }} />
+              <SelectionOverlay page={page} selectedIds={liveSelection} editingId={pathEdit?.id ?? editingId} zoom={zoom} guides={guides} marquee={marquee} measure={measure} titles={!useCanvas} visible={{ x: -pan.x / zoom, y: -pan.y / zoom, width: viewportSize.width / zoom, height: viewportSize.height / zoom }} />
               {pathEdit && page.objects[pathEdit.id] ? <PathEditOverlay node={page.objects[pathEdit.id]!} unit={1 / zoom} active={pathEdit.point} /> : null}
               {pen && pen.pageId === page.id ? <PenOverlay draft={pen} cursor={penCursor} unit={1 / zoom} /> : null}
               {rightTab === 'prototype' && selected ? <PrototypeLinks page={page} node={selected} unit={1 / zoom} /> : null}
@@ -1057,7 +1110,7 @@ export function App(): JSX.Element {
             <button className={rightTab === 'design' ? 'active' : ''} onClick={() => setRightTab('design')}>디자인</button>
             <button className={rightTab === 'prototype' ? 'active' : ''} onClick={() => setRightTab('prototype')}>프로토타입</button>
           </div>
-          {rightTab === 'design' && liveSelection.length > 0 ? <AlignBar count={topLevelIds(page, liveSelection).length} onAlign={alignSelection} onDistribute={distributeSelection} /> : null}
+          {rightTab === 'design' && liveSelection.length > 0 ? <AlignBar count={topLevelIds(page, liveSelection).length} onAlign={alignSelection} onDistribute={distributeSelection} onFlip={flipSelection} /> : null}
           {rightTab === 'prototype' ? (selected
             ? <PrototypePanel key={selected.id} page={page} node={selected}
               onChange={(interactions) => edit((current) => updateShape(current, page.id, selected.id, { interactions: interactions.length ? interactions : undefined }), `${selected.id}:interactions`)}
