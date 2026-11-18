@@ -50,6 +50,8 @@ interface LayersPanelProps {
   selectedIds: readonly string[];
   onSelect: (id: string, additive: boolean) => void;
   onToggle: (id: string, key: 'hidden' | 'locked') => void;
+  /** 레이어 이름을 더블클릭해 바꾼 결과. */
+  onRename: (id: string, name: string) => void;
   onDrop: (dragId: string, targetId: string, position: DropPosition) => void;
 }
 
@@ -71,7 +73,8 @@ function sameIds(a: readonly string[], b: readonly string[]): boolean {
  * 레이어 패널. 컨테이너는 접힌 채 시작하고(▸로 펼침), 선택한 도형의 조상은 자동으로 펼친다.
  * 문서·선택·콜백이 그대로면 다시 그리지 않는다(화면 이동 때 수천 행을 다시 만들지 않기 위해).
  */
-export const LayersPanel = memo(function LayersPanel({ page, selectedIds, onSelect, onToggle, onDrop }: LayersPanelProps): JSX.Element {
+export const LayersPanel = memo(function LayersPanel({ page, selectedIds, onSelect, onToggle, onDrop, onRename }: LayersPanelProps): JSX.Element {
+  const [renaming, setRenaming] = useState<string | null>(null);
   const [dragging, setDragging] = useState<string | null>(null);
   const [hint, setHint] = useState<{ id: string; position: DropPosition } | null>(null);
   const [opened, setOpened] = useState<ReadonlySet<string>>(new Set());
@@ -102,7 +105,11 @@ export const LayersPanel = memo(function LayersPanel({ page, selectedIds, onSele
         >
           {node.children?.length ? <button className="layer-caret" aria-label={expanded.has(node.id) ? '접기' : '펼치기'} onClick={(event) => { event.stopPropagation(); toggleOpen(node.id); }}>{expanded.has(node.id) ? '▾' : '▸'}</button> : <span className="layer-caret" />}
           <span className="layer-icon">{nodeIcon(node)}</span>
-          <span className="layer-name">{node.name}</span>
+          {renaming === node.id
+            ? <input className="layer-rename" autoFocus defaultValue={node.name} aria-label="레이어 이름" onClick={(event) => event.stopPropagation()} onFocus={(event) => event.currentTarget.select()}
+              onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur(); if (event.key === 'Escape') { event.currentTarget.value = node.name; event.currentTarget.blur(); } }}
+              onBlur={(event) => { onRename(node.id, event.currentTarget.value); setRenaming(null); }} />
+            : <span className="layer-name" title="더블클릭해 이름 바꾸기" onDoubleClick={(event) => { event.stopPropagation(); setRenaming(node.id); }}>{node.name}</span>}
           <span className="layer-actions">
             <button title={node.hidden ? '보이기' : '숨기기'} aria-label={node.hidden ? '보이기' : '숨기기'} onClick={(event) => { event.stopPropagation(); onToggle(node.id, 'hidden'); }}>{node.hidden ? '○' : '◉'}</button>
             <button title={node.locked ? '잠금 해제' : '잠그기'} aria-label={node.locked ? '잠금 해제' : '잠그기'} className={node.locked ? 'on' : ''} onClick={(event) => { event.stopPropagation(); onToggle(node.id, 'locked'); }}>{node.locked ? '■' : '□'}</button>
@@ -111,7 +118,7 @@ export const LayersPanel = memo(function LayersPanel({ page, selectedIds, onSele
       ))}
     </div>
   );
-}, (prev, next) => prev.page === next.page && sameIds(prev.selectedIds, next.selectedIds) && prev.onSelect === next.onSelect && prev.onToggle === next.onToggle && prev.onDrop === next.onDrop);
+}, (prev, next) => prev.page === next.page && sameIds(prev.selectedIds, next.selectedIds) && prev.onSelect === next.onSelect && prev.onToggle === next.onToggle && prev.onDrop === next.onDrop && prev.onRename === next.onRename);
 
 function dropPosition(event: DragEvent<HTMLDivElement>, node: DesignNode): DropPosition {
   const rect = event.currentTarget.getBoundingClientRect();

@@ -22,6 +22,8 @@ import { copyNodes, parseClipboard, pasteNodes, selectAllIds, type ClipboardData
 import { alignNodes, distributeNodes, type AlignMode, type DistributeAxis } from './align';
 import { AlignBar, ExportImageRow, type ExportChoice } from './alignBar';
 import { exportImage, safeFileName } from './imageExport';
+import { reorderNodes, type ReorderMode } from './arrange';
+import { Rulers } from './rulers';
 import type { PluginHost, PluginInfo } from './pluginApi';
 import { LayersPanel, PagesPanel, PropertiesPanel, type DropPosition } from './panels';
 import { exportTsx } from './export';
@@ -93,6 +95,14 @@ function downloadBlob(name: string, blob: Blob): void {
   anchor.href = url; anchor.download = name; anchor.click();
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
+
+/** 확대 범위. 큰 문서 전체를 한 화면에 보고(2%), 작은 아이콘을 자세히 볼 수 있게(800%) 한다. */
+const MIN_ZOOM = 0.02;
+const MAX_ZOOM = 8;
+const clampZoom = (value: number): number => Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, value));
+
+/** 방향키 → 이동 방향. */
+const ARROWS: Record<string, [number, number]> = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
 
 /** Alt+글자 정렬 단축키(Figma와 같음). */
 const ALIGN_KEYS: Record<string, AlignMode> = { a: 'left', d: 'right', h: 'h-center', w: 'top', s: 'bottom', v: 'v-center' };
@@ -200,15 +210,33 @@ export function App(): JSX.Element {
   const selected = liveSelection.length === 1 ? page.objects[liveSelection[0]!]! : null;
   const exported = codeOpen && selected ? exportTsx(doc, page.id, selected.id) : null;
 
-  const fitCanvas = useCallback((target: Page): void => {
+/** 영역(페이지 좌표)이 화면 가운데에 다 보이게 확대·이동한다. maxZoom보다 크게는 확대하지 않는다. */
+  const zoomToRect = useCallback((box: Rect, maxZoom: number): void => {
     const viewport = viewportRef.current;
-    const corners = walkPage(target).filter((node) => !node.hidden).flatMap(worldCorners);
-    if (!viewport || corners.length === 0) return;
+    if (!viewport) return;
     const bounds = viewport.getBoundingClientRect();
-    const box = boundsOf(corners);
-    const nextZoom = Math.min(1, Math.max(0.2, Math.min((bounds.width - 80) / Math.max(1, box.width), (bounds.height - 80) / Math.max(1, box.height))));
+    const nextZoom = clampZoom(Math.min(maxZoom, (bounds.width - 80) / Math.max(1, box.width), (bounds.height - 80) / Math.max(1, box.height)));
     setZoom(nextZoom);
     setPan({ x: (bounds.width - box.width * nextZoom) / 2 - box.x * nextZoom, y: (bounds.height - box.height * nextZoom) / 2 - box.y * nextZoom });
+  }, []);
+
+  /** 페이지 전체 맞춤(Shift+1). 100%보다 크게는 확대하지 않는다. */
+  const fitCanvas = useCallback((target: Page): void => {
+    const corners = walkPage(target).filter((node) => !node.hidden).flatMap(worldCorners);
+    if (corners.length) zoomToRect(boundsOf(corners), 1);
+  }, [zoomToRect]);
+
+  /** 화면 가운데를 기준으로 배율을 바꾼다(Ctrl+0, Ctrl+=, Ctrl+-, 확대 버튼). */
+  const zoomAtCenter = useCallback((next: (current: number) => number): void => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    const bounds = viewport.getBoundingClientRect();
+    const current = zoomRef.current;
+    const target = clampZoom(next(current));
+    const cx = bounds.width / 2;
+    const cy = bounds.height / 2;
+    setPan({ x: cx - ((cx - panRef.current.x) / current) * target, y: cy - ((cy - panRef.current.y) / current) * target });
+    setZoom(target);
   }, []);
 
   useEffect(() => { fitCanvas(pageOf(docRef.current, startup.document.pages[0]!.id)); }, [fitCanvas, startup]);
@@ -370,7 +398,7 @@ export function App(): JSX.Element {
       if (!event.ctrlKey) { setPan((value) => ({ x: value.x - event.deltaX, y: value.y - event.deltaY })); return; }
       event.preventDefault();
       const bounds = viewport.getBoundingClientRect();
-      const next = Math.min(3, Math.max(0.2, zoomRef.current * (event.deltaY < 0 ? 1.1 : 0.9)));
+      const next = clampZoom(zoomRef.current * (event.deltaY < 0 ? 1.1 : 0.9));
       const px = event.clientX - bounds.left; const py = event.clientY - bounds.top;
       const worldX = (px - panRef.current.x) / zoomRef.current; const worldY = (py - panRef.current.y) / zoomRef.current;
       setPan({ x: px - worldX * next, y: py - worldY * next }); setZoom(next);
@@ -475,6 +503,29 @@ export function App(): JSX.Element {
       .catch((error: unknown) => setNotice(message(error)));
   };
 
+  const reorderSelection = (mode: ReorderMode): void => { edit((current) => reorderNodes(current, page.id, liveSelection, mode)); };
+
+  /**
+   * 방향키로 옮기기(Shift면 10px). 연달아 누르면 undo 한 번으로 되돌아가게 합친다.
+   * 오토 레이아웃이 위치를 정하는 요소는 옮기는 대신 배치 방향을 따라 순서를 바꾼다(Figma와 같음).
+   */
+  const nudgeSelection = (arrow: string, step: number): void => {
+    const [dx, dy] = ARROWS[arrow]!;
+    const ids = topLevelIds(page, liveSelection).filter((id) => !page.objects[id]?.locked);
+    const laidOut = (id: string): boolean => { const parent = page.objects[page.objects[id]!.parentId ?? '']; return Boolean(parent?.layout && !page.objects[id]!.item?.absolute); };
+    const free = ids.filter((id) => !laidOut(id));
+    if (free.length) { edit((current) => moveMany(current, page.id, free, dx * step, dy * step), `nudge:${free.join(',')}`); return; }
+    const parent = ids[0] ? page.objects[page.objects[ids[0]]!.parentId ?? ''] : undefined;
+    if (!parent?.layout) return;
+    const along = parent.layout.direction === 'row' ? dx : dy;
+    if (along !== 0) reorderSelection(along > 0 ? 'forward' : 'backward');
+  };
+
+  const renameLayer = useStable((id: string, name: string): void => {
+    const clean = name.trim().slice(0, 200);
+    if (clean && clean !== page.objects[id]?.name) edit((current) => updateShape(current, page.id, id, { name: clean }));
+  });
+
   const deleteSelection = (): void => {
     const ids = topLevelIds(page, liveSelection);
     if (ids.length === 0) return;
@@ -538,6 +589,21 @@ export function App(): JSX.Element {
         if (!event.shiftKey && ALIGN_KEYS[key]) { event.preventDefault(); alignSelection(ALIGN_KEYS[key]!); return; }
       }
       if (mod && key === 'g') { event.preventDefault(); if (event.shiftKey) ungroupSelection(); else groupSelection(); return; }
+      // 물리 키(code)를 먼저 보고, code가 비어 있는 입력(일부 자동화·키보드 배열)은 글자(key)로 알아본다.
+      const bracketUp = event.code === 'BracketRight' || event.key === ']' || event.key === '}';
+      const bracketDown = event.code === 'BracketLeft' || event.key === '[' || event.key === '{';
+      if (mod && (bracketUp || bracketDown)) {
+        event.preventDefault();
+        const up = bracketUp;
+        reorderSelection(event.shiftKey ? (up ? 'front' : 'back') : (up ? 'forward' : 'backward'));
+        return;
+      }
+      if (mod && !event.shiftKey && (key === '0' || event.code === 'Digit0')) { event.preventDefault(); zoomAtCenter(() => 1); return; }
+      if (mod && (key === '=' || key === '+')) { event.preventDefault(); zoomAtCenter((value) => value * 1.25); return; }
+      if (mod && key === '-') { event.preventDefault(); zoomAtCenter((value) => value / 1.25); return; }
+      if (event.shiftKey && !mod && !event.altKey && (event.code === 'Digit1' || event.key === '!')) { event.preventDefault(); fitCanvas(page); return; }
+      if (event.shiftKey && !mod && !event.altKey && (event.code === 'Digit2' || event.key === '@') && liveSelection.length) { event.preventDefault(); zoomToRect(boundsOfIds(page, liveSelection), 4); return; }
+      if (ARROWS[event.key] && !mod && !event.altKey && liveSelection.length) { event.preventDefault(); nudgeSelection(event.key, event.shiftKey ? 10 : 1); return; }
       if (event.key === 'Delete' || event.key === 'Backspace') { event.preventDefault(); deleteSelection(); return; }
       if (event.key === 'Escape') { setTool('select'); setSelectedIds([]); return; }
       if (mod || event.altKey) return;
@@ -960,7 +1026,7 @@ export function App(): JSX.Element {
             {collab.file ? <button className={leftTab === 'comments' ? 'active' : ''} onClick={() => setLeftTab('comments')}>코멘트 <span>{collab.comments.filter((thread) => !thread.resolved).length}</span></button> : null}
           </div>
           {leftTab === 'comments' && collab.file ? <CommentsPanel collab={collab} page={page} draft={commentDraft} activeId={activeComment} onCancelDraft={() => setCommentDraft(null)} onFocus={focusComment} />
-          : leftTab !== 'assets' ? <LayersPanel page={page} selectedIds={liveSelection} onSelect={onLayerSelect} onToggle={onLayerToggle} onDrop={onLayerDropStable} />
+          : leftTab !== 'assets' ? <LayersPanel page={page} selectedIds={liveSelection} onSelect={onLayerSelect} onToggle={onLayerToggle} onDrop={onLayerDropStable} onRename={renameLayer} />
             : <AssetsPanel doc={doc} onInsert={insertInstance}
               onAddToken={(type) => { const id = crypto.randomUUID(); edit((current) => setToken(current, { id, type, name: `${type === 'color' ? 'Color' : 'Number'} ${Object.keys(current.tokens).length + 1}`, value: type === 'color' ? '#5369f8' : 8 })); }}
               onChangeToken={(token) => edit((current) => setToken(current, token), `token:${token.id}`)}
@@ -968,7 +1034,7 @@ export function App(): JSX.Element {
         </aside>
 
         <main className="canvas-area">
-          <div className="canvas-top-ruler"><span>0</span><span>200</span><span>400</span><span>600</span><span>800</span><span>1000</span></div>
+          <Rulers pan={pan} zoom={zoom} width={viewportSize.width} height={viewportSize.height} selection={liveSelection.length ? boundsOfIds(page, liveSelection) : null} />
           <div className="canvas-viewport" ref={viewportRef} onPointerDown={onCanvasDown} onDoubleClick={onCanvasDoubleClick} onPointerMove={(event) => { const world = toWorld(event.clientX, event.clientY); if (pen && !drag.current) setPenCursor(world); collab.session.current?.cursor(page.id, world.x, world.y); }} style={{ cursor: tool === 'hand' || spaceHeld ? 'grab' : tool === 'select' ? 'default' : 'crosshair' }}>
             {useCanvas ? <CanvasView page={page} pan={pan} zoom={zoom} editingId={editingId} resolveAsset={resolveAsset} /> : null}
             <div className="canvas-world" style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`, '--unit': 1 / zoom } as CSSProperties}>
@@ -983,7 +1049,7 @@ export function App(): JSX.Element {
               {collab.file ? <RemoteCursors cursors={collab.cursors} peers={collab.peers} pageId={page.id} unit={1 / zoom} /> : null}
             </div>
           </div>
-          <div className="zoom-controls"><button onClick={() => setZoom((value) => Math.max(0.2, +(value - 0.1).toFixed(2)))}>−</button><span>{Math.round(zoom * 100)}%</span><button onClick={() => setZoom((value) => Math.min(3, +(value + 0.1).toFixed(2)))}>+</button><button onClick={() => fitCanvas(page)}>맞춤</button></div>
+          <div className="zoom-controls"><button title="축소 (Ctrl+-)" onClick={() => zoomAtCenter((value) => value / 1.25)}>−</button><button className="zoom-value" title="100%로 (Ctrl+0)" onClick={() => zoomAtCenter(() => 1)}>{Math.round(zoom * 100)}%</button><button title="확대 (Ctrl+=)" onClick={() => zoomAtCenter((value) => value * 1.25)}>+</button><button title="전체 맞춤 (Shift+1)" onClick={() => fitCanvas(page)}>맞춤</button></div>
         </main>
 
         <aside className="right-panel">
