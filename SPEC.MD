@@ -82,13 +82,14 @@
 | [app/src/clipboard.ts](app/src/clipboard.ts), [align.ts](app/src/align.ts), [alignBar.tsx](app/src/alignBar.tsx), [svgExport.ts](app/src/svgExport.ts), [imageExport.ts](app/src/imageExport.ts) | 복사·붙여 넣기(새 id, 메인→인스턴스, 외부 입력 검사), 정렬·간격, 정렬·내보내기 버튼, SVG 쓰기, PNG·SVG 파일 만들기 |
 | [app/src/arrange.ts](app/src/arrange.ts), [rulers.tsx](app/src/rulers.tsx) | 레이어 순서 바꾸기, 눈금 간격·위치와 눈금자 |
 | [app/src/measure.ts](app/src/measure.ts) | Alt 거리 표시선 계산 |
+| [app/src/exportCss.ts](app/src/exportCss.ts), [exportMarkup.ts](app/src/exportMarkup.ts) | 출력 CSS 파일(클래스 이름, 토큰 CSS 변수)과 레이어 이름으로 고르는 HTML 요소 |
 | [app/src/styleCss.ts](app/src/styleCss.ts) | 채우기·선·효과·텍스트 스타일을 CSS로 (캔버스와 React 출력 공용) |
 | [app/src/stylePanels.tsx](app/src/stylePanels.tsx) | 채우기·선·효과·텍스트 편집 패널 |
 | [app/src/assets.ts](app/src/assets.ts) | 이미지 바이트 IndexedDB 저장, 형식 판별, base64 |
 | [app/src/figStyles.ts](app/src/figStyles.ts), [vectorNetwork.ts](app/src/vectorNetwork.ts), [report.tsx](app/src/report.tsx) | Figma 스타일 변환, 벡터 네트워크 경로 복원, 가져오기 보고서 |
 | [app/src/model.ts](app/src/model.ts) | 문서 스키마와 순수 변경 명령 |
 | [app/src/figmaImport.ts](app/src/figmaImport.ts) | `.fig` 파싱 결과의 선택 노드·컴포넌트·override 변환과 보고 |
-| [app/src/export.ts](app/src/export.ts) | 선택 노드 → TSX 문자열 |
+| [app/src/export.ts](app/src/export.ts) | 선택 노드 → TSX와 CSS 파일 |
 | [app/scripts/import-fig.mjs](app/scripts/import-fig.mjs) | 로컬 파일 변환 통계 확인, 선택적 JSON 출력 |
 | [app/tests](app/tests) | 모델·TSX 변환 및 선택적 실제 `.fig` 통합 검증 |
 
@@ -106,7 +107,7 @@
 
 ### 4.2 React 출력 규칙
 
-현재 [export.ts](app/src/export.ts)는 선택 노드의 하위 요소를 고정 크기·절대 좌표 TSX로 내보내고 텍스트를 선택적 props로 만든다. SVG 경로는 inline SVG로 출력한다. 편집 경로 벡터와 불리언 그룹은 결과 경로 하나(`<path>`)로 내보내고 피연산자는 내보내지 않는다. 프로토타입 상호작용은 내보내지 않는다. 이 출력은 **초안**이다. 완료 버전은 컴포넌트 이름·props를 안정적으로 생성하고, Auto Layout을 CSS flex/grid로, 이미지·글꼴을 에셋으로 분리하며, 독립 React 프로젝트에서 검증한다.
+현재 [export.ts](app/src/export.ts)는 선택 노드의 하위 요소를 TSX와 같은 이름의 CSS 파일로 내보내고 텍스트를 선택적 props로 만든다. 오토 레이아웃은 CSS flex, 나머지는 부모 기준 절대 좌표다. 스타일은 BEM 클래스(`블록__요소`)로 CSS 파일에 모이고 TSX는 인라인 스타일 없이 그 파일을 import한다. 단색 배경은 `background-color`로 쓴다. 태그는 레이어 이름으로 고른다(제목류 이름 → h1~h3, button·btn → button, input 이름 컨테이너 → label과 input, link → a, nav·gnb·breadcrumb → nav, header·footer·section, 그림만 채운 사각형 → alt가 있는 img, 나머지 텍스트 → p). variant 메인은 세트 이름(예: Button)으로 판단한다. 브라우저 기본 스타일은 클래스에서 초기화해 모양을 유지한다. 문서 토큰은 모두 `:root` CSS 변수가 되고, 연결된 반경·글자 크기·간격과 토큰 값과 같은 색은 `var()`로 쓴다. SVG 경로는 inline SVG로 출력한다. 편집 경로 벡터와 불리언 그룹은 결과 경로 하나(`<path>`)로 내보내고 피연산자는 내보내지 않는다. 프로토타입 상호작용은 내보내지 않는다. 이 출력은 **초안**이다. 완료 버전은 컴포넌트 이름·props를 안정적으로 생성하고, Auto Layout을 CSS flex/grid로, 이미지·글꼴을 에셋으로 분리하며, 독립 React 프로젝트에서 검증한다.
 
 ## 5. 다음 마일스톤의 완료 기준
 
