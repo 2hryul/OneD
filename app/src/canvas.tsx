@@ -1,10 +1,11 @@
-import { createContext, memo, useContext, useLayoutEffect, useState, useSyncExternalStore, type CSSProperties } from 'react';
+import { Fragment, createContext, memo, useContext, useLayoutEffect, useState, useSyncExternalStore, type CSSProperties } from 'react';
 import { IDENTITY, type DesignNode, type Matrix, type Page } from './model';
 import { HANDLES, boundsOf, cssMatrix, handlePoint, invert, multiply, worldCorners, worldMatrix, type Handle, type Rect } from './geometry';
 import type { Guide } from './snapping';
 import type { Measure } from './measure';
 import { fontStack, pathPaint, paintsToBackground, strokeAndEffectCss, textCss, textRuns, type AssetResolver } from './styleCss';
 import { pathToD } from './path';
+import { hasMask, maskImageUrl, maskRuns } from './mask';
 
 const HANDLE_CURSOR: Record<Handle, string> = { n: 'ns-resize', s: 'ns-resize', e: 'ew-resize', w: 'ew-resize', ne: 'nesw-resize', sw: 'nesw-resize', nw: 'nwse-resize', se: 'nwse-resize' };
 
@@ -71,18 +72,34 @@ const NodeView = memo(function NodeView({ id, parentWorld, parentLocked }: NodeV
   const editing = useSyncExternalStore(store.subscribe, () => store.scene.editingId === id);
   const skipped = useSyncExternalStore(store.subscribe, () => Boolean(store.scene.skip?.has(id)));
   const resolveAsset = useSyncExternalStore(store.subscribe, () => store.scene.resolveAsset);
+  // 마스크 자식의 모양·위치가 바뀌면 이 부모도 다시 그려야 한다. 마스크 그림 글자를 구독해 바뀔 때만 다시 그린다.
+  const maskKey = useSyncExternalStore(store.subscribe, () => masksOf(store.scene.page, id));
   if (!node || node.hidden || skipped) return null;
   const world = worldMatrix(node);
   const locked = parentLocked || Boolean(node.locked);
+  const child = (childId: string): JSX.Element => <NodeView key={childId} id={childId} parentWorld={world} parentLocked={locked} />;
   return (
     <div data-node-id={node.id} data-interactive={node.interactions?.length ? 'true' : undefined} className={`design-node node-${node.type}`} style={nodeStyle(node, multiply(invert(parentWorld), world), locked, resolveAsset)}>
       {node.type === 'text' ? (editing ? <TextEditor node={node} onDone={(nodeId, text) => store.scene.onTextDone(nodeId, text)} /> : <TextContent node={node} />) : null}
       {node.type === 'vector' || node.boolOp ? <VectorContent node={node} /> : null}
       {/* 불리언 그룹은 결과 경로만 보인다. 피연산자는 레이어에서 선택해 편집한다. */}
-      {node.boolOp ? null : node.children?.map((child) => <NodeView key={child} id={child} parentWorld={world} parentLocked={locked} />)}
+      {node.boolOp ? null : maskKey ? maskRuns(store.scene.page, node).map((run, index) => (run.mask
+        ? <div key={`mask-${run.mask.id}`} className="mask-run" style={{ width: node.width, height: node.height, maskImage: maskImageUrl(node, run.mask), WebkitMaskImage: maskImageUrl(node, run.mask) }}>{run.ids.map(child)}</div>
+        : <Fragment key={`free-${index}`}>{run.ids.map(child)}</Fragment>))
+        : node.children?.map(child)}
     </div>
   );
 }, (prev, next) => prev.id === next.id && prev.parentLocked === next.parentLocked && sameMatrix(prev.parentWorld, next.parentWorld));
+
+/**
+ * 부모의 마스크 그림 글자(마스크마다 data URL). 마스크가 없으면 빈 글자라 렌더 비용이 없다.
+ * 마스크 도형이 움직이거나 모양이 바뀌면 글자가 바뀌어 부모가 다시 그려진다.
+ */
+function masksOf(page: Page, id: string): string {
+  const parent = page.objects[id];
+  if (!parent || parent.boolOp || !hasMask(page, parent)) return '';
+  return maskRuns(page, parent).flatMap((run) => (run.mask ? [maskImageUrl(parent, run.mask)] : [])).join('|');
+}
 
 /**
  * 벡터 내용. 편집 경로가 있으면(펜·평탄화·불리언) 그 경로를 도형 좌표 그대로 그리고,

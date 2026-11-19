@@ -1,4 +1,6 @@
-import { variantName, walkPage, type Component, type DesignDocument, type DesignNode, type Page } from './model';
+import { variantName, walkPage, type Component, type DesignDocument, type DesignNode, type GridLayout, type Page } from './model';
+import { formatTracks } from './gridLayout';
+import { hasMask, maskImageUrl, maskRuns } from './mask';
 import { applyPoint, center, invert, isFlipped, linearPart, multiply, rotationDegrees, worldMatrix } from './geometry';
 import { fontStack, pathPaint, paintsToBackground, strokeAndEffectCss, textCss, textRuns, withAlpha } from './styleCss';
 import { pathToD } from './path';
@@ -90,7 +92,9 @@ function axisPlacement(constraint: string, start: number, size: number, parentSi
  * 입력창이 placeholder 글자 폭(예: 24px)으로 나오면 실제로 쓸 수 없기 때문이다.
  */
 function flowPlacement(node: DesignNode, parent: DesignNode, control: boolean): Style {
-  const row = parent.layout!.direction === 'row';
+  const layout = parent.layout!;
+  if (layout.type === 'grid') return gridPlacement(node, control);
+  const row = layout.direction === 'row';
   const style: Style = { position: 'relative', boxSizing: 'border-box', flexShrink: 0 };
   const sizes = { h: node.item?.h ?? 'fix', v: node.item?.v ?? 'fix' };
   const main = row ? sizes.h : sizes.v;
@@ -108,8 +112,36 @@ function flowPlacement(node: DesignNode, parent: DesignNode, control: boolean): 
   return style;
 }
 
+/**
+ * Grid 칸 안의 크기와 자리. 채우기는 칸 크기로 늘이고(justify-self·align-self: stretch), 고정은 크기를 적는다.
+ * 칸이 지정된 자식은 grid-row·grid-column(1부터)을 적고, 나머지는 CSS 자동 배치(편집기 엔진과 같은 행 순서)에 맡긴다.
+ */
+function gridPlacement(node: DesignNode, control: boolean): Style {
+  const style: Style = { position: 'relative', boxSizing: 'border-box', minWidth: 0 };
+  const cell = node.item?.gridCell;
+  if (cell) { style.gridRow = String(cell.row + 1); style.gridColumn = String(cell.column + 1); }
+  const h = node.item?.h ?? 'fix';
+  const v = node.item?.v ?? 'fix';
+  if (h === 'fill' || control) style.justifySelf = 'stretch';
+  else if (h === 'fix') { style.width = node.width; style.maxWidth = '100%'; }
+  if (v === 'fill') style.alignSelf = 'stretch';
+  else if (v === 'fix' || control) style.height = node.height;
+  for (const key of ['minWidth', 'maxWidth', 'minHeight', 'maxHeight'] as const) if (node.item?.[key] !== undefined) style[key] = node.item[key]!;
+  return style;
+}
+
+/** Grid 컨테이너 CSS. 트랙은 편집기와 같은 글자(1fr 120px auto)로, 모자란 행은 내용에 맞춤(grid-auto-rows: auto)이다. */
+function gridStyle(layout: GridLayout): Style {
+  return {
+    display: 'grid', gridTemplateColumns: formatTracks(layout.columns), ...(layout.rows.length ? { gridTemplateRows: formatTracks(layout.rows) } : {}), gridAutoRows: 'auto',
+    columnGap: layout.columnGap, rowGap: layout.rowGap, justifyItems: layout.justifyItems, alignItems: layout.alignItems,
+    padding: layout.padding.map((value) => `${value}px`).join(' ')
+  };
+}
+
 function layoutStyle(node: DesignNode): Style {
   if (!node.layout) return {};
+  if (node.layout.type === 'grid') return gridStyle(node.layout);
   const { direction, gap, crossGap, padding, justify, align, wrap } = node.layout;
   return {
     display: 'flex', flexDirection: direction, justifyContent: JUSTIFY_CSS[justify], alignItems: ALIGN_CSS[align],
@@ -322,18 +354,18 @@ function stackOnNarrow(node: DesignNode, style: Style, context: RenderContext): 
   const layout = node.layout;
   if (!layout) return null;
   const narrow: Style = typeof style.height === 'number' ? { height: 'auto', minHeight: style.height } : {};
-  if (!context.component && layout.direction === 'row' && !layout.wrap && node.width >= 600) {
+  if (!context.component && layout.type === 'flex' && layout.direction === 'row' && !layout.wrap && node.width >= 600) {
     Object.assign(narrow, { flexDirection: 'column', alignItems: 'stretch', columnGap: 0, rowGap: layout.justify === 'space-between' ? 0 : layout.gap });
   }
   return Object.keys(narrow).length ? narrow : null;
 }
 
 /** 도형의 CSS 규칙을 만든다. 요소 초기화 스타일 위에 도형 스타일을 덮고, 글자 스타일과 토큰 값은 변수로 바꾼다. */
-function addRule(context: RenderContext, className: string, node: DesignNode, parent: DesignNode | null, element: Element): void {
+function addRule(context: RenderContext, className: string, node: DesignNode, parent: DesignNode | null, element: Element, extra: Style = {}): void {
   const { state } = context;
   const root = node.id === context.rootId;
   const hints: StyleHints = { fluid: root && context.fluid, control: element.tag === 'input' || element.tag === 'textarea', asset: (id) => { state.assets.add(id); return state.assetFile(id); } };
-  const style: Style = { ...element.reset, ...styleFor(node, parent, hints) };
+  const style: Style = { ...element.reset, ...styleFor(node, parent, hints), ...extra };
   if (element.tag === 'img') delete style.background;
   const final = withTokens(withTypography(style, node, state.vars), node, state.vars);
   context.rules.push({ selector: `.${className}`, style: final, keepOrder: root && context.component });
@@ -363,17 +395,53 @@ function renderNode(node: DesignNode, parent: DesignNode | null, depth: number, 
   if (node.componentId && !node.mainInstance && !root) return [`${indent}${usage(context, node, parent)}`];
   const element = elementOf(node, phrasing, context);
   const className = root ? context.block : uniqueIn(context.state.classes, `${context.block}__${kebab(node.name)}`);
-  addRule(context, className, node, parent, element);
+  const masking = element.tag === 'img' || node.boolOp ? null : maskPlan(context, node);
+  addRule(context, className, node, parent, element, masking?.self ? maskStyle(node, masking.self) : {});
   const attrs = element.assetId ? [imageSource(context.state, element.assetId), ...element.attrs] : [...element.attrs];
   const described = context.field?.described.get(node.id);
   if (described) attrs.unshift(`id={\`\${fieldId}-${described}\`}`);
   const open = [element.tag, classAttr(className, root), ...attrs].join(' ');
   if (node.type === 'text') return [`${indent}${textJsx(node, element, open, className, context)}`];
   if (node.path || node.type === 'vector') return [`${indent}<${open} ${vectorBody(node)}</svg>`];
-  const children = element.tag === 'img' ? [] : visibleChildren(context, node);
+  const childPhrasing = phrasing || element.phrasing;
+  const body = masking
+    ? masking.runs.flatMap((run) => renderRun(run, node, depth + 1, context, childPhrasing))
+    : (element.tag === 'img' ? [] : visibleChildren(context, node)).flatMap((child) => renderNode(child, node, depth + 1, context, childPhrasing));
   const extra = root && context.choice ? [`${indent}  ${choiceInput(context)}`] : [];
-  if (children.length === 0 && extra.length === 0) return [`${indent}<${open} />`];
-  return [`${indent}<${open}>`, ...extra, ...children.flatMap((child) => renderNode(child, node, depth + 1, context, phrasing || element.phrasing)), `${indent}</${element.tag}>`];
+  if (body.length === 0 && extra.length === 0) return [`${indent}<${open} />`];
+  return [`${indent}<${open}>`, ...extra, ...body, `${indent}</${element.tag}>`];
+}
+
+/**
+ * 마스크 자식이 있는 도형의 출력 방식. 마스크 도형 자신은 어느 경우에도 내보내지 않는다.
+ * - 첫 자식이 마스크이고 뒤가 모두 그 구간이며 도형 자신에 채우기·선·효과가 없으면, 도형 요소에 mask-image를 건다(아이콘의 Bounding box 마스크가 이 경우).
+ * - 레이아웃이 없는 도형이면 마스크 구간마다 부모를 덮는 감싸개 요소에 mask-image를 건다.
+ * - 오토 레이아웃 도형은 감싸개가 흐름을 바꾸므로 마스크 없이 내보낸다(한계).
+ */
+function maskPlan(context: RenderContext, node: DesignNode): { self?: DesignNode; runs: Array<{ mask?: DesignNode; ids: string[] }> } | null {
+  if (!node.children?.length || !hasMask(context.page, node)) return null;
+  const runs = maskRuns(context.page, node).map((run) => ({ ...run, ids: run.ids.filter((id) => !context.hidden.has(id)) }));
+  const bare = node.fills.length === 0 && !node.strokes?.length && !node.effects?.length;
+  if (runs.length === 1 && runs[0]!.mask && bare) return { self: runs[0]!.mask, runs: [{ ids: runs[0]!.ids }] };
+  if (node.layout) return { runs: runs.map((run) => ({ ids: run.ids })) };
+  return { runs };
+}
+
+/** mask-image 스타일. 마스크 그림은 부모 상자 크기의 SVG라 상자 전체에 늘려 붙인다. */
+function maskStyle(parent: DesignNode, mask: DesignNode): Style {
+  const image = maskImageUrl(parent, mask);
+  return { maskImage: image, WebkitMaskImage: image, maskSize: '100% 100%', WebkitMaskSize: '100% 100%', maskRepeat: 'no-repeat', WebkitMaskRepeat: 'no-repeat' };
+}
+
+/** 마스크 구간 하나. 마스크가 있으면 부모를 그대로 덮는 감싸개(같은 좌표계)에 마스크를 걸고 그 안에 구간 자식을 낸다. */
+function renderRun(run: { mask?: DesignNode; ids: string[] }, parent: DesignNode, depth: number, context: RenderContext, phrasing: boolean): string[] {
+  const nodes = run.ids.map((id) => context.page.objects[id]).filter((child): child is DesignNode => Boolean(child));
+  if (!run.mask) return nodes.flatMap((child) => renderNode(child, parent, depth, context, phrasing));
+  const indent = '  '.repeat(depth);
+  const tag = phrasing ? 'span' : 'div';
+  const className = uniqueIn(context.state.classes, `${context.block}__${kebab(run.mask.name)}-mask`);
+  context.rules.push({ selector: `.${className}`, style: { display: 'block', position: 'absolute', left: 0, top: 0, width: '100%', height: '100%', ...maskStyle(parent, run.mask) } });
+  return [`${indent}<${tag} className="${className}">`, ...nodes.flatMap((child) => renderNode(child, parent, depth + 1, context, phrasing)), `${indent}</${tag}>`];
 }
 
 /** radio·checkbox의 실제 input. 화면에서는 숨기고(디자인의 동그라미가 보임) 보조 기술과 키보드가 쓴다. */

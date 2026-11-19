@@ -1,6 +1,7 @@
 import { primaryColor, type DesignNode, type Matrix, type Page, type Paint } from './model';
 import { boundsOf, multiply, worldCorners, worldMatrix, type Rect } from './geometry';
 import { pathToD } from './path';
+import { maskShapes } from './mask';
 import { DEFAULT_FONT_STACK, fontStack, textRuns, withAlpha } from './styleCss';
 
 /** 화면 상태. pan은 화면 픽셀, zoom은 배율, dpr은 장치 픽셀 비율이다. */
@@ -109,9 +110,33 @@ function drawNode(state: DrawState, id: string, alpha: number): void {
   if (!offscreen && !tiny && node.id !== state.skipId) { drawSelf(state, node); state.stats.drawn++; }
   if (!node.boolOp && node.children?.length) {
     if (clips(node)) { ctx.setTransform(...multiply(state.base, worldMatrix(node))); ctx.beginPath(); roundRect(ctx, node); ctx.clip(); }
-    for (const child of node.children) drawNode(state, child, opacity);
+    drawChildren(state, node, opacity);
   }
   ctx.restore();
+}
+
+/**
+ * 자식을 그린다. 마스크 자식을 만나면 그 자리부터(다음 마스크 전까지) 마스크 윤곽으로 자르고, 마스크 자신은 그리지 않는다.
+ * 마스크 윤곽은 마스크 도형의 월드 행렬로 놓는다(DOM의 mask-image, SVG의 clipPath와 같은 모양).
+ */
+function drawChildren(state: DrawState, node: DesignNode, opacity: number): void {
+  const { ctx } = state;
+  let masked = false;
+  for (const id of node.children!) {
+    const child = state.page.objects[id];
+    if (child?.mask && !child.hidden) {
+      if (masked) ctx.restore();
+      ctx.save();
+      masked = true;
+      ctx.setTransform(...multiply(state.base, worldMatrix(child)));
+      const outline = new Path2D();
+      for (const shape of maskShapes(child)) outline.addPath(new Path2D(shape.d), new DOMMatrix(shape.scale ? [shape.scale[0], 0, 0, shape.scale[1], 0, 0] : [1, 0, 0, 1, 0, 0]));
+      ctx.clip(outline, maskShapes(child).some((shape) => shape.evenodd) ? 'evenodd' : 'nonzero');
+      continue;
+    }
+    drawNode(state, id, opacity);
+  }
+  if (masked) ctx.restore();
 }
 
 /** 하위 노드 객체 목록(그리는 순서). 보관한 그림이 아직 맞는지 객체 비교로 확인하는 데 쓴다. */

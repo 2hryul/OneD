@@ -1,7 +1,8 @@
 import { walkPage, type DesignDocument, type DesignNode, type Matrix, type Page } from './model.ts';
 import { applyPoint, boundsOf, center, invert, linearPart, multiply, roundRect, worldCorners, worldMatrix, type Point } from './geometry.ts';
 import { applyChanges, composeTransactions, EMPTY_TRANSACTION, moveShapes, resizeShape, updateShape, type Transaction } from './changes.ts';
-import { computeFlex, type Box } from './layout.ts';
+import { computeFlex, type Box, type FlexChild, type FlexResult } from './layout.ts';
+import { computeGrid } from './gridLayout.ts';
 
 const MAX_PASSES = 8;
 
@@ -40,9 +41,11 @@ export function layoutContainer(doc: DesignDocument, pageId: string, id: string)
   const children = flowChildren(page, node).map((child) => localChild(child, toLocal, linearPart(node.transform)));
   // 보이는 자식이 없으면 Figma는 내용에 맞춤이어도 마지막 크기를 유지한다.
   if (children.length === 0) return EMPTY_TRANSACTION;
-  const result = computeFlex({ width: node.width, height: node.height, layout: node.layout, item: node.item }, children.map(({ node: child, bounds, rotated }) => ({
+  const flowItems: FlexChild[] = children.map(({ node: child, bounds, rotated }) => ({
     id: child.id, width: bounds.width, height: bounds.height, item: rotated ? { ...child.item, h: 'fix', v: 'fix' } : child.item
-  })));
+  }));
+  const container = { width: node.width, height: node.height, item: node.item };
+  const result: FlexResult = node.layout.type === 'grid' ? computeGrid({ ...container, layout: node.layout }, flowItems) : computeFlex({ ...container, layout: node.layout }, flowItems);
   const middle = applyPoint(world, { x: result.width / 2, y: result.height / 2 });
   const box = roundRect({ x: middle.x - result.width / 2, y: middle.y - result.height / 2, width: result.width, height: result.height });
   // 왼쪽 위를 기준으로 크기만 바뀌므로 지역 좌표 → 페이지 좌표 변환은 바뀌기 전 행렬과 같다.
@@ -123,6 +126,7 @@ function relayoutPage(doc: DesignDocument, pageId: string, ids: Set<string>): Tr
 
 /**
  * 레이아웃 컨테이너 안에서 point(페이지 좌표)에 놓을 순서. 주축에서 point보다 앞에 있는 형제 수다.
+ * Grid는 칸을 행 순서로 채우므로, 위 행에 있거나 같은 행에서 왼쪽에 있는 형제를 앞으로 센다.
  * 끌어서 놓을 때 Figma처럼 자식 순서를 바꾸는 데 쓴다.
  */
 export function dropIndex(page: Page, containerId: string, point: Point, moving: ReadonlySet<string>): number {
@@ -130,12 +134,18 @@ export function dropIndex(page: Page, containerId: string, point: Point, moving:
   if (!container?.layout) return container?.children?.length ?? 0;
   const toLocal = invert(worldMatrix(container));
   const local = applyPoint(toLocal, point);
-  const axis = container.layout.direction === 'row' ? 'x' : 'y';
+  const layout = container.layout;
+  const before = (child: DesignNode): boolean => {
+    const at = applyPoint(toLocal, center(child));
+    if (layout.type === 'flex') return layout.direction === 'row' ? at.x < local.x : at.y < local.y;
+    const sameRow = Math.abs(at.y - local.y) <= child.height / 2;
+    return sameRow ? at.x < local.x : at.y < local.y;
+  };
   const siblings = (container.children ?? []).filter((id) => !moving.has(id));
   let index = 0;
   siblings.forEach((id, position) => {
     const child = page.objects[id];
-    if (child && !child.hidden && !child.item?.absolute && applyPoint(toLocal, center(child))[axis] < local[axis]) index = position + 1;
+    if (child && !child.hidden && !child.item?.absolute && before(child)) index = position + 1;
   });
   return index;
 }

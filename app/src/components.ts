@@ -449,7 +449,12 @@ export function tokenPatch(node: DesignNode, slot: TokenSlot, token: Token): Par
     }
     case 'radius': return { radius: Number(token.value) };
     case 'fontSize': return { fontSize: Number(token.value) };
-    case 'gap': return node.layout ? { layout: { ...node.layout, gap: Number(token.value) } } : {};
+    case 'gap': {
+      const gap = Number(token.value);
+      // Grid는 열·행 간격 둘 다에 같은 값을 쓴다.
+      if (node.layout?.type === 'grid') return { layout: { ...node.layout, columnGap: gap, rowGap: gap } };
+      return node.layout ? { layout: { ...node.layout, gap } } : {};
+    }
   }
 }
 

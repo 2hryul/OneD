@@ -1,5 +1,5 @@
 import { parseFig, resolveVectorNodePaths, type FigDocument, type FigNode, type FigPaint } from 'openfig-core';
-import { isContainer, pageFromNodes, parseVariantName, type Component, type DesignDocument, type FlexLayout, type Matrix, type NodeInput, type NodeType, type Page, type Token } from './model.ts';
+import { isContainer, pageFromNodes, parseVariantName, type Component, type DesignDocument, type Layout, type Matrix, type NodeInput, type NodeType, type Page, type Token } from './model.ts';
 import { topInstanceRoot, touchedAgainstMain } from './components.ts';
 import { applyPoint, cleanMatrix, linearPart, multiply } from './geometry.ts';
 import type { AssetRecord } from './assets.ts';
@@ -214,7 +214,7 @@ interface WalkState {
   hiddenTargets: Set<string>;
 }
 
-interface WalkInput { source: FigNode; id: string; parentId: string | null; world: Matrix; isRoot: boolean; symbolTrail: Set<string>; overrides: FigOverride[]; parentLayout?: FlexLayout }
+interface WalkInput { source: FigNode; id: string; parentId: string | null; world: Matrix; isRoot: boolean; symbolTrail: Set<string>; overrides: FigOverride[]; parentLayout?: Layout }
 
 function createState(fig: FigDocument): WalkState {
   const report: ImportReport = { imported: 0, expandedInstances: 0, unresolvedInstances: 0, approximatedShapes: 0, appliedOverrides: 0, unappliedOverrides: 0, issues: [], components: 0, linkedInstances: 0, tokens: 0 };
@@ -273,7 +273,7 @@ function prepareInstance(state: WalkState, instance: FigNode, id: string): Prepa
   return { own: [...all.filter((item) => !atRoot.includes(item)), ...derived], rootPatch };
 }
 
-interface ExpandContext { trail: Set<string>; own: FigOverride[]; remaining: FigOverride[]; layout?: FlexLayout }
+interface ExpandContext { trail: Set<string>; own: FigOverride[]; remaining: FigOverride[]; layout?: Layout }
 
 function expandInstance(state: WalkState, instance: FigNode, id: string, world: Matrix, context: ExpandContext): void {
   const { trail: symbolTrail, own, remaining } = context;
@@ -292,7 +292,7 @@ function expandInstance(state: WalkState, instance: FigNode, id: string, world: 
   }
 }
 
-function convertNode(state: WalkState, node: FigNode, id: string, parentId: string | null, world: Matrix, parentLayout?: FlexLayout): NodeInput {
+function convertNode(state: WalkState, node: FigNode, id: string, parentId: string | null, world: Matrix, parentLayout?: Layout): NodeInput {
   const type = toType(node);
   const layout = type === 'frame' ? figLayout(state.sink, node, id) : undefined;
   const item = figItem(node, type, layout, parentLayout);
@@ -311,6 +311,8 @@ function convertNode(state: WalkState, node: FigNode, id: string, parentId: stri
     ...(node.opacity !== undefined && node.opacity < 1 ? { opacity: node.opacity } : {}),
     ...(node.cornerRadius ? { radius: node.cornerRadius } : {}),
     ...(type === 'frame' && node.frameMaskDisabled ? { clipContent: false } : {}),
+    // Figma "마스크로 쓰기". 같은 부모 안에서 위의 형제를 이 도형 모양으로 자른다.
+    ...((node as { mask?: boolean }).mask ? { mask: true } : {}),
     // Figma "스크롤할 때 위치 고정". 보기 모드는 화면 바로 아래 자식에서만 이 값을 쓴다.
     ...((node as { scrollBehavior?: string }).scrollBehavior === 'FIXED_WHEN_CHILD_OF_SCROLLING_FRAME' ? { fixedScroll: true } : {}),
     ...(layout ? { layout } : {}),

@@ -3,6 +3,7 @@ import { worldMatrix } from './geometry';
 import { pathToD } from './path';
 import { withAlpha } from './styleCss';
 import { exportBox, layoutText, placeLines } from './canvasRenderer';
+import { maskPaths, maskRuns, maskShapes } from './mask';
 
 interface SvgOptions {
   /** 이미지 채우기를 넣을 data URL. 없으면 회색 상자로 대신한다. */
@@ -50,7 +51,7 @@ function emitNode(writer: SvgWriter, id: string): string {
   const opacity = node.opacity !== undefined && node.opacity < 1 ? ` opacity="${num(node.opacity)}"` : '';
   let out = `<g${opacity}>` + emitSelf(writer, node);
   if (!node.boolOp && node.children?.length) {
-    const children = node.children.map((child) => emitNode(writer, child)).join('');
+    const children = maskRuns(writer.page, node).map((run) => emitRun(writer, run)).join('');
     if (node.type === 'frame' && node.clipContent !== false) {
       const clip = writer.id('clip');
       writer.defs.push(`<clipPath id="${clip}">${shapeElement(node, '')}</clipPath>`);
@@ -58,6 +59,15 @@ function emitNode(writer: SvgWriter, id: string): string {
     } else out += children;
   }
   return out + '</g>';
+}
+
+/** 마스크 구간 하나. 마스크가 있으면 그 윤곽(마스크 월드 행렬)의 clipPath로 감싸고, 마스크 도형 자신은 그리지 않는다. */
+function emitRun(writer: SvgWriter, run: { mask?: DesignNode; ids: string[] }): string {
+  const body = run.ids.map((id) => emitNode(writer, id)).join('');
+  if (!run.mask) return body;
+  const clip = writer.id('mask');
+  writer.defs.push(`<clipPath id="${clip}">${maskPaths(maskShapes(run.mask), '', matrixOf(run.mask))}</clipPath>`);
+  return `<g clip-path="url(#${clip})">${body}</g>`;
 }
 
 /** 도형 모양 요소 하나(지역 좌표 + 월드 행렬). attrs는 채우기·선 등 덧붙일 속성이다. */

@@ -9,6 +9,7 @@ import { AutoLayoutSection, ConstraintsSection, SizingSection } from './layoutPa
 export type DropPosition = 'above' | 'below' | 'inside';
 
 export function nodeIcon(node: DesignNode): string {
+  if (node.mask) return '◐';
   if (node.componentSet) return '⬖';
   if (node.mainInstance) return '◆';
   if (node.componentId) return '◇';

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ChangeEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import { emptyPage, isContainer, parseDocument, solid, walkPage, type BoolOp, type DesignDocument, type DesignNode, type Matrix, type NodeInput, type Page, type Paint, type SubPath } from './model';
 import {
-  EMPTY_TRANSACTION, addPage, addShape, deletePage, renamePage, applyChanges, childrenOf, composeTransactions, createBoolean, deleteShapes, fitPathBounds, flattenToPath, groupShapes, moveMany,
+  EMPTY_TRANSACTION, addPage, addShape, deletePage, renamePage, applyChanges, childrenOf, composeTransactions, createBoolean, createMask, deleteShapes, fitPathBounds, flattenToPath, groupShapes, moveMany,
   flipShapes, recordTransaction, removeToken, reparentShape, replaceDocument, setToken, resizeShape, rotateShape, topLevelIds, ungroupShape, updateShape,
   type FlipAxis, type HistoryEntry, type Transaction
 } from './changes';
@@ -454,6 +454,20 @@ export function App(): JSX.Element {
     if (edit((current) => groupShapes(current, page.id, ids, id))) { setSelectedIds([id]); setNotice(`${ids.length}개 요소를 그룹으로 묶었습니다.`); }
   };
 
+  /** 선택을 마스크 그룹으로(맨 아래 도형이 마스크). 하나만 골랐고 이미 마스크면 마스크를 끈다. */
+  const maskSelection = (): void => {
+    const ids = topLevelIds(page, liveSelection);
+    const only = ids.length === 1 ? page.objects[ids[0]!] : undefined;
+    if (only?.mask) { edit((current) => updateShape(current, page.id, only.id, { mask: undefined })); setNotice('마스크를 해제했습니다.'); return; }
+    if (ids.length < 2) { setNotice('마스크로 쓰려면 요소를 두 개 이상 고르세요. 맨 아래 요소가 마스크가 됩니다.'); return; }
+    const id = crypto.randomUUID();
+    try {
+      if (edit((current) => createMask(current, page.id, ids, id))) { setSelectedIds([id]); setNotice('맨 아래 요소를 마스크로 썼습니다.'); }
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '[maskSelection] 마스크 만들기 실패');
+    }
+  };
+
   const ungroupSelection = (): void => {
     const groups = liveSelection.filter((id) => page.objects[id]?.type === 'group');
     if (groups.length === 0) return;
@@ -564,7 +578,8 @@ export function App(): JSX.Element {
     if (free.length) { edit((current) => moveMany(current, page.id, free, dx * step, dy * step), `nudge:${free.join(',')}`); return; }
     const parent = ids[0] ? page.objects[page.objects[ids[0]]!.parentId ?? ''] : undefined;
     if (!parent?.layout) return;
-    const along = parent.layout.direction === 'row' ? dx : dy;
+    // Grid는 칸을 행 순서로 채우므로 오른쪽·아래는 뒤로, 왼쪽·위는 앞으로 보낸다.
+    const along = parent.layout.type === 'grid' ? dx + dy : parent.layout.direction === 'row' ? dx : dy;
     if (along !== 0) reorderSelection(along > 0 ? 'forward' : 'backward');
   };
 
@@ -637,6 +652,7 @@ export function App(): JSX.Element {
         if (event.shiftKey && (key === 'h' || key === 'v')) { event.preventDefault(); distributeSelection(key === 'h' ? 'horizontal' : 'vertical'); return; }
         if (!event.shiftKey && ALIGN_KEYS[key]) { event.preventDefault(); alignSelection(ALIGN_KEYS[key]!); return; }
       }
+      if (mod && event.altKey && key === 'm') { event.preventDefault(); maskSelection(); return; }
       if (mod && key === 'g') { event.preventDefault(); if (event.shiftKey) ungroupSelection(); else groupSelection(); return; }
       // 물리 키(code)를 먼저 보고, code가 비어 있는 입력(일부 자동화·키보드 배열)은 글자(key)로 알아본다.
       const bracketUp = event.code === 'BracketRight' || event.key === ']' || event.key === '}';
@@ -1160,7 +1176,7 @@ export function App(): JSX.Element {
             : <div className="nothing-selected"><span>▶</span><strong>프로토타입</strong><p>요소를 선택해 클릭·마우스·지연 트리거를 연결하고, 보기 모드로 실행합니다.</p><button className="wide-action" onClick={present}>▶ 보기 모드로 실행</button></div>)
           : selected ? <PropertiesPanel key={selected.id} node={selected} parent={selected.parentId ? page.objects[selected.parentId] : undefined}
             header={<ComponentSection doc={doc} page={page} node={selected} onCreate={makeComponent} onSwitchVariant={(componentId) => switchInstanceVariant(selected.id, componentId)} onGoToMain={() => goToMain(selected)} onReset={() => edit((current) => resetOverrides(current, page.id, selected.id))} onDetach={() => edit((current) => detachInstance(current, page.id, selected.id))} />}
-            path={<PathSection node={selected} onOp={(op) => edit((current) => updateShape(current, page.id, selected.id, { boolOp: op, name: op[0]!.toUpperCase() + op.slice(1) }))} onFlatten={flattenSelection} onEditPath={() => startPathEdit(selected)} />}
+            path={<><PathSection node={selected} onOp={(op) => edit((current) => updateShape(current, page.id, selected.id, { boolOp: op, name: op[0]!.toUpperCase() + op.slice(1) }))} onFlatten={flattenSelection} onEditPath={() => startPathEdit(selected)} />{selected.mask ? <button className="wide-action" title="Ctrl+Alt+M" onClick={maskSelection}>◐ 마스크 해제</button> : null}</>}
             tokens={<TokenSection doc={doc} node={selected} onApply={(slot, tokenId) => edit((current) => applyToken(current, page.id, selected.id, slot, tokenId))} />}
             onPickImage={(index) => { imageTarget.current = { nodeId: selected.id, index }; imageRef.current?.click(); }}
             onChange={(patch) => setProperty(selected, patch)}
@@ -1168,7 +1184,7 @@ export function App(): JSX.Element {
             onOpenCode={() => setCodeOpen(true)}
             onDelete={deleteSelection}
             exportRow={<ExportImageRow onExport={exportSelection} />} />
-            : liveSelection.length > 1 ? <div className="nothing-selected"><span>⧉</span><strong>{liveSelection.length}개 선택됨</strong><p>Ctrl+G로 묶거나 Delete로 지울 수 있습니다.</p><button className="wide-action" onClick={groupSelection}>그룹으로 묶기</button><BooleanButtons onApply={applyBoolean} /><ExportImageRow onExport={exportSelection} />{liveSelection.every((id) => page.objects[id]?.mainInstance) ? <button className="wide-action" onClick={combineSelection}>⬖ variant로 묶기</button> : null}</div>
+            : liveSelection.length > 1 ? <div className="nothing-selected"><span>⧉</span><strong>{liveSelection.length}개 선택됨</strong><p>Ctrl+G로 묶거나 Delete로 지울 수 있습니다.</p><button className="wide-action" onClick={groupSelection}>그룹으로 묶기</button><button className="wide-action" title="맨 아래 요소가 위 요소들을 자릅니다 (Ctrl+Alt+M)" onClick={maskSelection}>◐ 마스크로 쓰기</button><BooleanButtons onApply={applyBoolean} /><ExportImageRow onExport={exportSelection} />{liveSelection.every((id) => page.objects[id]?.mainInstance) ? <button className="wide-action" onClick={combineSelection}>⬖ variant로 묶기</button> : null}</div>
             : <div className="nothing-selected"><span>◈</span><strong>선택된 요소가 없습니다</strong><p>캔버스나 레이어에서 요소를 선택하면 속성이 표시됩니다.</p></div>}
         </aside>
       </div>

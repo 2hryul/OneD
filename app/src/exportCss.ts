@@ -68,7 +68,9 @@ export function withTokens(style: Style, node: DesignNode, vars: TokenVars): Sty
   const fontSize = bound('fontSize');
   if (fontSize && next.fontSize !== undefined) next.fontSize = fontSize;
   const gap = bound('gap');
-  for (const key of ['columnGap', 'rowGap']) if (gap && node.layout && next[key] === node.layout.gap) next[key] = gap;
+  const layout = node.layout;
+  const gapValues = layout?.type === 'grid' ? [layout.columnGap, layout.rowGap] : layout ? [layout.gap] : [];
+  for (const key of ['columnGap', 'rowGap']) if (gap && gapValues.includes(next[key] as number)) next[key] = gap;
   for (const [key, value] of Object.entries(next)) {
     if (typeof value === 'string') next[key] = value.replace(HEX, (hex) => vars.byColor.get(hex.toLowerCase()) ?? hex);
   }

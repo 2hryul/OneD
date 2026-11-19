@@ -541,6 +541,24 @@ export function createBoolean(doc: DesignDocument, pageId: string, ids: readonly
 }
 
 /**
+ * 선택을 마스크 그룹으로 묶는다(Figma Use as mask, Ctrl+Alt+M). 그룹으로 묶고 맨 아래 도형을 마스크로 만든다.
+ * 마스크 도형은 그려지지 않고 위의 형제들을 자기 모양으로 자른다. 인스턴스 안의 요소는 메인과의 연결이 깨지므로 거부한다.
+ */
+export function createMask(doc: DesignDocument, pageId: string, ids: readonly string[], groupId: string): Transaction {
+  const page = findPage(doc, pageId);
+  const nodes = ids.map((id) => findNode(page, id));
+  if (nodes.length < 2) throw new Error('마스크로 쓰려면 요소를 두 개 이상 고르세요.');
+  if (nodes.some((node) => node.shapeRef)) throw new Error('인스턴스 안의 요소로는 마스크를 만들 수 없습니다.');
+  const siblings = childrenOf(page, nodes[0]!.parentId);
+  const bottom = [...nodes].sort((a, b) => siblings.indexOf(a.id) - siblings.indexOf(b.id))[0]!;
+  return composeTransactions(doc, [
+    (current) => groupShapes(current, pageId, ids, groupId),
+    (current) => updateShape(current, pageId, groupId, { name: 'Mask group' }),
+    (current) => updateShape(current, pageId, bottom.id, { mask: true })
+  ]);
+}
+
+/**
  * 도형을 편집 경로를 가진 벡터로 바꾼다(Figma 평탄화 Ctrl+E). 불리언 그룹은 결과 경로가 되고, 사각형·타원·가져온 벡터는 같은 모양의 경로가 된다.
  * 같은 id와 같은 순서로 바꿔 넣어 선택과 레이어 위치가 유지된다. 인스턴스 안의 요소는 메인과의 연결이 깨지므로 거부한다.
  */

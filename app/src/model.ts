@@ -83,8 +83,8 @@ export interface DesignNode {
   opacity?: number;
   radius?: number;
   sourceType?: string;
-  /** frame에만 의미가 있다. 있으면 자식 위치·크기를 레이아웃 엔진이 정한다(Figma Auto Layout, Penpot flex). */
-  layout?: FlexLayout;
+  /** frame에만 의미가 있다. 있으면 자식 위치·크기를 레이아웃 엔진이 정한다(Figma Auto Layout·Grid, Penpot flex·grid). */
+  layout?: Layout;
   /** 레이아웃 안에서의 크기 규칙과 정렬. 레이아웃 컨테이너 자신의 'auto'는 내용에 맞춤(hug)이다. */
   item?: LayoutItem;
   /** 레이아웃이 없는 프레임의 크기가 바뀔 때 이 자식이 따라가는 방식. 없으면 left·top. */
@@ -98,6 +98,11 @@ export interface DesignNode {
   path?: SubPath[];
   /** group에만 있다. 있으면 자식(피연산자)을 이 연산으로 합친 결과 경로(path)를 그린다(비파괴 불리언). */
   boolOp?: BoolOp;
+  /**
+   * true면 마스크 도형이다(Figma Use as mask). 자신은 그려지지 않고, 같은 부모 안에서 자기 위에 그려지는 형제를
+   * 다음 마스크 전까지 자기 채우기 윤곽으로 자른다.
+   */
+  mask?: boolean;
   /** frame에서 false면 내용을 자르지 않는다(Figma의 Clip content 끔). 기본은 자른다. */
   clipContent?: boolean;
   hidden?: boolean;
@@ -164,7 +169,7 @@ export const TOKEN_SLOT_TYPE: Record<TokenSlot, TokenType> = { fill: 'color', st
 export const SYNC_GROUPS = {
   name: ['name'],
   fill: ['fills'],
-  content: ['text', 'spans', 'vectorPaths', 'viewBox', 'fillRule', 'path', 'boolOp'],
+  content: ['text', 'spans', 'vectorPaths', 'viewBox', 'fillRule', 'path', 'boolOp', 'mask'],
   visibility: ['hidden'],
   modifiable: ['locked'],
   'text-font': ['fontSize', 'fontFamily', 'fontWeight'],
@@ -213,6 +218,27 @@ export interface FlexLayout {
   align: FlexAlign;
 }
 
+/** Grid 트랙 크기. fixed는 px, flex는 남는 공간의 비율(fr), auto는 그 줄 내용 중 가장 큰 크기에 맞춤(hug). */
+export interface GridTrack { type: 'fixed' | 'flex' | 'auto'; value: number }
+
+/**
+ * Penpot `:layout :grid`·Figma Grid auto layout과 같은 구성. padding은 위·오른쪽·아래·왼쪽 순서다.
+ * 자식은 item.gridCell이 있으면 그 칸에, 없으면 빈 칸을 행 순서로 채운다. 칸이 모자라면 내용에 맞춤 행이 늘어난다.
+ * justifyItems는 칸 안 가로 정렬, alignItems는 세로 정렬이다(stretch는 '채우기' 자식에만 의미가 있다).
+ */
+export interface GridLayout {
+  type: 'grid';
+  columns: GridTrack[];
+  rows: GridTrack[];
+  columnGap: number;
+  rowGap: number;
+  padding: [number, number, number, number];
+  justifyItems: FlexAlign;
+  alignItems: FlexAlign;
+}
+
+export type Layout = FlexLayout | GridLayout;
+
 /** fix는 현재 크기 고정, fill은 부모 남는 공간 채우기, auto는 내용에 맞춤(hug). */
 export type ItemSizing = 'fix' | 'fill' | 'auto';
 
@@ -220,6 +246,8 @@ export interface LayoutItem {
   h?: ItemSizing;
   v?: ItemSizing;
   alignSelf?: FlexAlign;
+  /** Grid 부모 안에서 들어갈 칸(0부터). 없으면 자동 배치된다. */
+  gridCell?: { row: number; column: number };
   /** 레이아웃 흐름에서 빠져 지금 위치를 유지한다(Figma absolute position). */
   absolute?: boolean;
   minWidth?: number;
@@ -399,7 +427,7 @@ function checkNodeFields(node: unknown, version: 1 | 2 | 3 | 4 | 5): asserts nod
     !isFiniteNumber(node.x) || !isFiniteNumber(node.y) || !isFiniteNumber(node.width) || !isFiniteNumber(node.height) ||
     node.width <= 0 || node.height <= 0 || (node.parentId !== null && typeof node.parentId !== 'string')) throw new Error('Invalid node');
   if (version < 3 ? typeof node.fill !== 'string' : !isArrayOf(node.fills, isPaint)) throw new Error('Invalid node');
-  if (!optional(node.hidden, isBoolean) || !optional(node.locked, isBoolean) || !optional(node.clipContent, isBoolean)) throw new Error('Invalid node');
+  if (!optional(node.hidden, isBoolean) || !optional(node.locked, isBoolean) || !optional(node.clipContent, isBoolean) || !optional(node.mask, isBoolean)) throw new Error('Invalid node');
   if (!optional(node.strokes, (value) => isArrayOf(value, isStroke)) || !optional(node.effects, (value) => isArrayOf(value, isEffect))) throw new Error('Invalid style');
   if (!optional(node.spans, (value) => isArrayOf(value, isSpan))) throw new Error('Invalid text');
   if (!optional(node.textAlign, (value) => ['left', 'center', 'right', 'justify'].includes(value as string)) ||
@@ -408,7 +436,7 @@ function checkNodeFields(node: unknown, version: 1 | 2 | 3 | 4 | 5): asserts nod
   if (version === 5 && !isComponentFields(node)) throw new Error('Invalid component fields');
   if (!optional(node.path, (value) => isArrayOf(value, isSubPath)) || !optional(node.boolOp, (value) => ['union', 'subtract', 'intersect', 'exclude'].includes(value as string))) throw new Error('Invalid path');
   if (!optional(node.interactions, (value) => isArrayOf(value, isInteraction)) || !optional(node.fixedScroll, isBoolean)) throw new Error('Invalid interaction');
-  if (version >= 4 && (!optional(node.layout, isFlexLayout) || !optional(node.item, isLayoutItem) || !optional(node.constraints, isConstraints))) throw new Error('Invalid layout');
+  if (version >= 4 && (!optional(node.layout, (value) => isFlexLayout(value) || isGridLayout(value)) || !optional(node.item, isLayoutItem) || !optional(node.constraints, isConstraints))) throw new Error('Invalid layout');
 }
 
 function isFlexLayout(value: unknown): boolean {
@@ -417,11 +445,20 @@ function isFlexLayout(value: unknown): boolean {
     ['start', 'center', 'end', 'space-between'].includes(value.justify as string) && ['start', 'center', 'end', 'stretch'].includes(value.align as string);
 }
 
+function isGridLayout(value: unknown): boolean {
+  const align = (item: unknown): boolean => ['start', 'center', 'end', 'stretch'].includes(item as string);
+  const track = (item: unknown): boolean => isRecord(item) && ['fixed', 'flex', 'auto'].includes(item.type as string) && isFiniteNumber(item.value) && (item.value as number) >= 0;
+  return isRecord(value) && value.type === 'grid' && isArrayOf(value.columns, track) && (value.columns as unknown[]).length > 0 && isArrayOf(value.rows, track) &&
+    isFiniteNumber(value.columnGap) && isFiniteNumber(value.rowGap) && Array.isArray(value.padding) && value.padding.length === 4 && value.padding.every(isFiniteNumber) &&
+    align(value.justifyItems) && align(value.alignItems);
+}
+
 function isLayoutItem(value: unknown): boolean {
   const sizing = (item: unknown): boolean => ['fix', 'fill', 'auto'].includes(item as string);
   return isRecord(value) && optional(value.h, sizing) && optional(value.v, sizing) && optional(value.absolute, isBoolean) &&
     optional(value.alignSelf, (item) => ['start', 'center', 'end', 'stretch'].includes(item as string)) &&
-    [value.minWidth, value.maxWidth, value.minHeight, value.maxHeight].every((item) => optional(item, isFiniteNumber));
+    [value.minWidth, value.maxWidth, value.minHeight, value.maxHeight].every((item) => optional(item, isFiniteNumber)) &&
+    optional(value.gridCell, (cell) => isRecord(cell) && Number.isInteger(cell.row) && Number.isInteger(cell.column) && (cell.row as number) >= 0 && (cell.column as number) >= 0);
 }
 
 function isConstraints(value: unknown): boolean {
