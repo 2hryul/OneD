@@ -21,6 +21,14 @@ interface FigGuid { sessionID?: number; localID?: number }
 interface FigTrackList { entries?: Array<{ id?: FigGuid; position?: string }> }
 interface FigTrackSizes { entries?: Array<{ id?: FigGuid; trackSize?: { maxSizing?: { type?: string; value?: number } } }> }
 
+/**
+ * Figma 숫자 값 읽기. "자동" 간격 같은 값은 NaN·Infinity로 저장되는데, 그대로 담으면 JSON 저장 때 null이 되어 문서를 다시 열 수 없다.
+ * 유한한 값이 아니면 fallback을 쓴다.
+ */
+function finite(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
 const guidKey = (id: FigGuid | undefined): string => `${id?.sessionID ?? ''}:${id?.localID ?? ''}`;
 
 /** Figma 트랙 목록을 위치(분수 순서 문자열) 순으로 정렬하고 크기 종류를 붙인다. FLEX → fr, HUG → 내용에 맞춤, FIXED → px. */
@@ -42,7 +50,7 @@ function figGrid(node: FigNode, padding: GridLayout['padding']): GridLayout | un
   const columns = figTracks(raw.gridColumns, raw.gridColumnsSizing);
   const rows = figTracks(raw.gridRows, raw.gridRowsSizing);
   if (columns.tracks.length === 0) return undefined;
-  const layout: GridLayout = { type: 'grid', columns: columns.tracks, rows: rows.tracks, columnGap: raw.gridColumnGap ?? 0, rowGap: raw.gridRowGap ?? 0, padding, justifyItems: 'start', alignItems: 'start' };
+  const layout: GridLayout = { type: 'grid', columns: columns.tracks, rows: rows.tracks, columnGap: finite(raw.gridColumnGap, 0), rowGap: finite(raw.gridRowGap, 0), padding, justifyItems: 'start', alignItems: 'start' };
   // 자동 재배치(gridReflowEnabled)가 켜진 그리드는 자식 순서대로 칸을 채운다. 이때 저장된 칸 기준은 복제 전 값이 남아 실제 배치와 다를 수 있어(실제 파일에서 확인) 쓰지 않는다.
   if (!raw.gridReflowEnabled) gridAnchors.set(layout, { rows: rows.index, columns: columns.index });
   return layout;
@@ -56,22 +64,23 @@ export function figLayout(sink: StyleSink, node: FigNode, nodeId: string): Layou
   if (!node.stackMode || node.stackMode === 'NONE') return undefined;
   // "선을 레이아웃에 포함"(bordersTakeSpace)이면 Figma는 선 두께만큼 안쪽 여백을 더 둔다. 안쪽 선은 전체, 가운데 선은 절반이다.
   const inset = strokeInset(node);
-  const top = (node.stackVerticalPadding ?? 0) + inset;
-  const left = (node.stackHorizontalPadding ?? 0) + inset;
+  const top = finite(node.stackVerticalPadding, 0) + inset;
+  const left = finite(node.stackHorizontalPadding, 0) + inset;
+  const padding: [number, number, number, number] = [top, finite(node.stackPaddingRight, left - inset) + inset, finite(node.stackPaddingBottom, top - inset) + inset, left];
   if (node.stackMode === 'GRID') {
-    const grid = figGrid(node, [top, node.stackPaddingRight !== undefined ? node.stackPaddingRight + inset : left, node.stackPaddingBottom !== undefined ? node.stackPaddingBottom + inset : top, left]);
+    const grid = figGrid(node, padding);
     if (!grid) report(sink, node, nodeId, 'layout-unsupported', '열 정보가 없는 Grid. 현재 위치로 고정');
     return grid;
   }
   if (node.stackCounterAlignItems === 'BASELINE') report(sink, node, nodeId, 'layout-approximated', '기준선 정렬을 위쪽 정렬로 근사');
-  const gap = node.stackSpacing ?? 0;
+  const gap = finite(node.stackSpacing, 0);
   return {
     type: 'flex',
     direction: node.stackMode === 'HORIZONTAL' ? 'row' : 'column',
     wrap: node.stackWrap === 'WRAP',
     gap,
-    crossGap: node.stackCounterSpacing ?? gap,
-    padding: [top, node.stackPaddingRight !== undefined ? node.stackPaddingRight + inset : left, node.stackPaddingBottom !== undefined ? node.stackPaddingBottom + inset : top, left],
+    crossGap: finite(node.stackCounterSpacing, gap),
+    padding,
     justify: JUSTIFY[node.stackPrimaryAlignItems as string] ?? 'start',
     align: ALIGN[node.stackCounterAlignItems as string] ?? 'start'
   };
@@ -111,10 +120,12 @@ export function figItem(node: FigNode, type: NodeType, layout: Layout | undefine
   }
   const min = (node.minSize as { value?: { x?: number | null; y?: number | null } } | undefined)?.value;
   const max = (node.maxSize as { value?: { x?: number | null; y?: number | null } } | undefined)?.value;
-  if (min?.x) item.minWidth = min.x;
-  if (min?.y) item.minHeight = min.y;
-  if (max?.x) item.maxWidth = max.x;
-  if (max?.y) item.maxHeight = max.y;
+  // Figma는 "제한 없음"을 Infinity로 저장한다. 그대로 담으면 JSON 저장 때 null이 되어 다시 열 수 없으므로 0보다 큰 유한한 값만 받는다.
+  const limit = (value: number | null | undefined): value is number => typeof value === 'number' && Number.isFinite(value) && value > 0;
+  if (limit(min?.x)) item.minWidth = min.x;
+  if (limit(min?.y)) item.minHeight = min.y;
+  if (limit(max?.x)) item.maxWidth = max.x;
+  if (limit(max?.y)) item.maxHeight = max.y;
   return Object.keys(item).length ? item : undefined;
 }
 

@@ -44,6 +44,23 @@ export function importFigFile(bytes: Uint8Array, rootId: string): FigImportResul
   return importFigNode(parseFig(bytes), rootId);
 }
 
+/**
+ * 자식 노드를 그리는 순서(parentIndex.position)대로. Figma의 순서 문자열은 문자 코드 순으로 비교해야 한다.
+ * 파서(openfig-core)는 localeCompare로 정렬해 공백 등이 든 문자열(" ~")의 순서가 틀어지므로 여기서 다시 정렬한다.
+ * 정렬 결과는 문서 하나 안에서 같으므로 부모 id별로 한 번만 계산한다.
+ */
+const orderCache = new WeakMap<FigDocument, Map<string, FigNode[]>>();
+function childrenOf(fig: FigDocument, parentId: string): FigNode[] {
+  const cache = orderCache.get(fig) ?? new Map<string, FigNode[]>();
+  orderCache.set(fig, cache);
+  const cached = cache.get(parentId);
+  if (cached) return cached;
+  const position = (node: FigNode): string => (node.parentIndex as { position?: string } | undefined)?.position ?? '';
+  const sorted = [...(fig.childrenMap.get(parentId) ?? [])].sort((a, b) => (position(a) < position(b) ? -1 : position(a) > position(b) ? 1 : 0));
+  cache.set(parentId, sorted);
+  return sorted;
+}
+
 function nodeId(node: FigNode): string {
   return guidId(node.guid);
 }
@@ -148,7 +165,7 @@ function registerMains(state: WalkState, source: FigNode, rootId: string, result
     return;
   }
   result.setIds.add(rootId);
-  for (const child of state.fig.childrenMap.get(guidId(source.guid)) ?? []) {
+  for (const child of childrenOf(state.fig, guidId(source.guid))) {
     if (child.type !== 'SYMBOL') continue;
     const id = guidId(child.guid);
     const mainId = `${rootId}/${id}`;
@@ -214,7 +231,52 @@ interface WalkState {
   hiddenTargets: Set<string>;
 }
 
-interface WalkInput { source: FigNode; id: string; parentId: string | null; world: Matrix; isRoot: boolean; symbolTrail: Set<string>; overrides: FigOverride[]; parentLayout?: Layout }
+/** 컴포넌트 속성 값(속성 정의 id → 값). 텍스트 속성은 characters, 불리언 속성은 bool이다. */
+type PropValues = Map<string, { text?: string; bool?: boolean }>;
+
+interface WalkInput { source: FigNode; id: string; parentId: string | null; world: Matrix; isRoot: boolean; symbolTrail: Set<string>; overrides: FigOverride[]; parentLayout?: Layout; props?: PropValues }
+
+interface FigPropAssignment { defID?: Guid; value?: { textValue?: { characters?: string }; boolValue?: boolean } }
+interface FigPropRef { defID?: Guid; componentPropNodeField?: string }
+
+/**
+ * 인스턴스의 컴포넌트 속성 값을 모은다(Figma component properties). 바깥 인스턴스에서 물려받은 값 위에 이 인스턴스의 값과,
+ * override로 들어온 값(중첩 인스턴스의 속성을 바깥에서 바꾼 경우)을 차례로 덮는다.
+ */
+function collectProps(inherited: PropValues | undefined, lists: ReadonlyArray<FigPropAssignment[] | undefined>): PropValues {
+  const props: PropValues = new Map(inherited);
+  for (const list of lists) for (const item of list ?? []) {
+    if (!item.defID || !item.value) continue;
+    const text = item.value.textValue?.characters;
+    props.set(guidId(item.defID), text !== undefined ? { text } : { bool: item.value.boolValue });
+  }
+  return props;
+}
+
+/**
+ * 노드가 참조하는 컴포넌트 속성을 적용한다. TEXT_DATA는 글자, VISIBLE은 보이기다.
+ * 글자가 바뀌면 글자별 스타일 표는 길이가 맞을 때만 남긴다(맞지 않으면 첫 스타일로 그린다).
+ * 인스턴스 교체(INSTANCE_SWAP)는 아직 지원하지 않아 보고만 남긴다.
+ */
+function applyPropRefs(state: WalkState, node: FigNode, id: string, props: PropValues | undefined): FigNode {
+  const refs = (node as unknown as { componentPropRefs?: FigPropRef[] }).componentPropRefs;
+  if (!refs?.length || !props?.size) return node;
+  let next = node;
+  for (const ref of refs) {
+    const value = ref.defID ? props.get(guidId(ref.defID)) : undefined;
+    if (!value) continue;
+    if (ref.componentPropNodeField === 'TEXT_DATA' && value.text !== undefined) {
+      const textData = (next.textData ?? {}) as { characters?: string; characterStyleIDs?: number[] };
+      const keepStyles = (textData.characterStyleIDs?.length ?? 0) === value.text.length;
+      next = { ...next, textData: { ...textData, characters: value.text, ...(keepStyles ? {} : { characterStyleIDs: [] }) } } as FigNode;
+    } else if (ref.componentPropNodeField === 'VISIBLE' && value.bool !== undefined) {
+      next = { ...next, visible: value.bool };
+    } else if (ref.componentPropNodeField === 'OVERRIDDEN_SYMBOL_ID') {
+      state.report.issues.push({ nodeId: id, name: node.name || node.type, kind: 'prop-unsupported', detail: '인스턴스 교체 속성은 아직 지원하지 않음. 기본 컴포넌트로 표시' });
+    }
+  }
+  return next;
+}
 
 function createState(fig: FigDocument): WalkState {
   const report: ImportReport = { imported: 0, expandedInstances: 0, unresolvedInstances: 0, approximatedShapes: 0, appliedOverrides: 0, unappliedOverrides: 0, issues: [], components: 0, linkedInstances: 0, tokens: 0 };
@@ -222,16 +284,27 @@ function createState(fig: FigDocument): WalkState {
   return { fig, sink: { fig, assets: new Map(), issues: report.issues }, nodes: [], report, overrides: [], applied: new Set(), hiddenTargets: new Set(), instanceSymbols: new Map(), styles, tokens: new Map() };
 }
 
+/**
+ * override 경로 한 칸이 이 노드를 가리키는지. 새 파일은 노드의 overrideKey를, 예전 방식 파일은 노드 guid를 경로에 쓴다.
+ * 둘 다 받아야 두 형식의 파일에서 override가 적용된다(커뮤니티 템플릿에서 guid 형식을 확인).
+ */
+function pathMatcher(node: FigNode | undefined): (step: string | undefined) => boolean {
+  if (!node) return () => false;
+  const keys = new Set([nodeId(node), ...(node.overrideKey ? [guidId(node.overrideKey as Guid)] : [])]);
+  return (step) => step !== undefined && keys.has(step);
+}
+
 function walk(state: WalkState, input: WalkInput): void {
   const { source, id, overrides } = input;
-  const key = source.overrideKey ? guidId(source.overrideKey as Guid) : null;
-  const own = overrides.filter((item) => item.path[0] === key && item.path.length === 1);
-  const effective = Object.assign({}, source, ...own.map((item) => item.patch)) as FigNode;
+  const matches = pathMatcher(source);
+  const own = overrides.filter((item) => matches(item.path[0]) && item.path.length === 1);
+  // 컴포넌트 속성을 먼저 적용하고, 사용자가 직접 바꾼 override가 그 위를 덮는다.
+  const effective = Object.assign({}, applyPropRefs(state, source, id, input.props), ...own.map((item) => item.patch)) as FigNode;
   for (const item of own) state.applied.add(item.id);
-  const remaining = overrides.flatMap((item) => item.path[0] === key ? (item.path.length > 1 ? [{ ...item, path: item.path.slice(1) }] : []) : [item]);
+  const remaining = overrides.flatMap((item) => matches(item.path[0]) ? (item.path.length > 1 ? [{ ...item, path: item.path.slice(1) }] : []) : [item]);
   // 숨긴 노드도 hidden으로 가져온다. 메인에서는 숨겼지만 인스턴스에서 override로 보이게 한 노드가 메인 쪽 짝을 가져야 동기화가 지우지 않는다.
   if (effective.phase === 'REMOVED' || !effective.size) {
-    for (const item of overrides) if (item.path[0] === key && item.path.length > 1) state.hiddenTargets.add(item.id);
+    for (const item of overrides) if (matches(item.path[0]) && item.path.length > 1) state.hiddenTargets.add(item.id);
     return;
   }
   const instance = effective.type === 'INSTANCE' ? prepareInstance(state, effective, id) : null;
@@ -242,10 +315,13 @@ function walk(state: WalkState, input: WalkInput): void {
   state.report.imported++;
   // 불리언 연산 등 벡터로 바꾼 노드의 자식(피연산자)은 이미 경로에 들어 있으므로 따로 가져오지 않는다.
   if (!isContainer(converted)) return;
-  for (const child of state.fig.childrenMap.get(nodeId(source)) ?? []) {
-    walk(state, { source: child, id: `${id}/${nodeId(child)}`, parentId: id, world, isRoot: false, symbolTrail: input.symbolTrail, overrides: remaining, parentLayout: converted.layout });
+  for (const child of childrenOf(state.fig, nodeId(source))) {
+    walk(state, { source: child, id: `${id}/${nodeId(child)}`, parentId: id, world, isRoot: false, symbolTrail: input.symbolTrail, overrides: remaining, parentLayout: converted.layout, props: input.props });
   }
-  if (instance) expandInstance(state, shaped, id, world, { trail: input.symbolTrail, own: instance.own, remaining, layout: converted.layout });
+  if (instance) {
+    const assignments = [source, ...own.map((item) => item.patch)].map((patch) => (patch as unknown as { componentPropAssignments?: FigPropAssignment[] }).componentPropAssignments);
+    expandInstance(state, shaped, id, world, { trail: input.symbolTrail, own: instance.own, remaining, layout: converted.layout, props: collectProps(input.props, assignments) });
+  }
 }
 
 interface PreparedInstance { own: FigOverride[]; rootPatch: Partial<FigNode> }
@@ -266,14 +342,14 @@ function prepareInstance(state: WalkState, instance: FigNode, id: string): Prepa
     .filter((item: FigOverride) => item.path.length > 0);
   const symbolGuid = instance.symbolData?.symbolID as Guid | undefined;
   const symbol = symbolGuid ? state.fig.nodeMap.get(guidId(symbolGuid)) : undefined;
-  const rootKey = symbol?.overrideKey ? guidId(symbol.overrideKey as Guid) : null;
-  const atRoot = all.filter((item) => item.path.length === 1 && item.path[0] === rootKey);
+  const isRoot = pathMatcher(symbol);
+  const atRoot = all.filter((item) => item.path.length === 1 && isRoot(item.path[0]));
   for (const item of atRoot) state.applied.add(item.id);
   const rootPatch = Object.assign({}, ...atRoot.map((item) => { const { guidPath: _guidPath, ...rest } = item.patch as Record<string, unknown>; void _guidPath; return rest; })) as Partial<FigNode>;
   return { own: [...all.filter((item) => !atRoot.includes(item)), ...derived], rootPatch };
 }
 
-interface ExpandContext { trail: Set<string>; own: FigOverride[]; remaining: FigOverride[]; layout?: Layout }
+interface ExpandContext { trail: Set<string>; own: FigOverride[]; remaining: FigOverride[]; layout?: Layout; props?: PropValues }
 
 function expandInstance(state: WalkState, instance: FigNode, id: string, world: Matrix, context: ExpandContext): void {
   const { trail: symbolTrail, own, remaining } = context;
@@ -287,8 +363,8 @@ function expandInstance(state: WalkState, instance: FigNode, id: string, world: 
   state.report.expandedInstances++;
   state.instanceSymbols.set(id, symbolId);
   const trail = new Set(symbolTrail).add(symbolId);
-  for (const child of state.fig.childrenMap.get(symbolId) ?? []) {
-    walk(state, { source: child, id: `${id}/${nodeId(child)}`, parentId: id, world, isRoot: false, symbolTrail: trail, overrides: [...own, ...remaining], parentLayout: context.layout });
+  for (const child of childrenOf(state.fig, symbolId)) {
+    walk(state, { source: child, id: `${id}/${nodeId(child)}`, parentId: id, world, isRoot: false, symbolTrail: trail, overrides: [...own, ...remaining], parentLayout: context.layout, props: context.props });
   }
 }
 
