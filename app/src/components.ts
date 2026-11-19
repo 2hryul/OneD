@@ -4,13 +4,15 @@ import {
   addShape, applyChanges, composeTransactions, deleteShape, EMPTY_TRANSACTION, reparentShape, resizeShape, setComponent, updateShape, childrenOf,
   type Transaction
 } from './changes.ts';
+import { applyAllInstanceProps } from './componentProps.ts';
 
 type Step = (current: DesignDocument) => Transaction;
 type IdFactory = () => string;
 
 const NON_GEOMETRY_GROUPS = (Object.keys(SYNC_GROUPS) as SyncGroup[]).filter((group) => group !== 'geometry');
 /** 인스턴스 루트에서 동기화하지 않는 묶음. 루트가 부모 안에서 놓이는 방식은 인스턴스마다 다르다(Penpot swap-keep-attrs). */
-const ROOT_LOCAL_GROUPS: ReadonlySet<SyncGroup> = new Set(['name', 'constraints', 'layout-item', 'visibility', 'modifiable']);
+// props: 인스턴스 루트의 속성 값은 그 인스턴스가 정하는 값이라 메인 루트(값 없음)로 덮지 않는다.
+const ROOT_LOCAL_GROUPS: ReadonlySet<SyncGroup> = new Set(['name', 'constraints', 'layout-item', 'visibility', 'modifiable', 'props']);
 const COPY_SKIP = new Set(['id', 'parentId', 'children', 'mainInstance', 'touched', 'shapeRef', 'componentSet']);
 
 export function findNode(doc: DesignDocument, id: string): { page: Page; node: DesignNode } | null {
@@ -157,21 +159,27 @@ export function markTouched(before: DesignDocument, after: DesignDocument, userT
     const pageAfter = after.pages.find((page) => page.id === pageId);
     if (!pageBefore || !pageAfter) continue;
     for (const id of set) {
-      const groups = touchedGroups(pageBefore, pageAfter, id);
+      const groups = touchedGroups(pageBefore, pageAfter, id, after);
       if (groups) steps.push((current) => updateShape(current, pageId, id, { touched: groups }));
     }
   }
   return composeTransactions(after, steps);
 }
 
-function touchedGroups(pageBefore: Page, pageAfter: Page, id: string): SyncGroup[] | null {
+/**
+ * 사용자 편집으로 생긴 override 묶음. 바뀐 속성이라도 컴포넌트 속성이 정하는 값이거나(속성 값으로 관리됨) 메인과 같아진 값이면 override가 아니다.
+ */
+function touchedGroups(pageBefore: Page, pageAfter: Page, id: string, after: DesignDocument): SyncGroup[] | null {
   const prev = pageBefore.objects[id];
   const next = pageAfter.objects[id];
   if (!prev || !next?.shapeRef) return null;
+  const main = findNode(after, next.shapeRef)?.node;
   const groups = new Set(next.touched ?? []);
   const size = groups.size;
+  const value = (node: DesignNode, attr: string): unknown => (node as unknown as Record<string, unknown>)[attr];
   for (const group of NON_GEOMETRY_GROUPS) {
-    if ((SYNC_GROUPS[group] as readonly string[]).some((attr) => !same((prev as unknown as Record<string, unknown>)[attr], (next as unknown as Record<string, unknown>)[attr]))) groups.add(group);
+    const overridden = (SYNC_GROUPS[group] as readonly string[]).some((attr) => !propDriven(prev, attr) && !propDriven(next, attr) && !same(value(prev, attr), value(next, attr)) && !(main && same(value(main, attr), value(next, attr))));
+    if (overridden) groups.add(group);
   }
   const rootAfter = topInstanceRoot(pageAfter, id);
   const rootBefore = rootAfter ? pageBefore.objects[rootAfter.id] : undefined;
@@ -257,7 +265,9 @@ export function syncInstance(doc: DesignDocument, pageId: string, rootId: string
     (current) => removeExtraShapes(current, pageId, rootId, main.node.id),
     (current) => addMissingShapes(current, pageId, rootId, main.node.id),
     (current) => copyUntouchedAttrs(current, pageId, rootId, main.node.id),
-    (current) => (mode === 'reset' ? placeAll(current, pageId, rootId, main.node.id) : applyMainDeltas(current, mode.before, pageId, rootId, main.node.id))
+    (current) => (mode === 'reset' ? placeAll(current, pageId, rootId, main.node.id) : applyMainDeltas(current, mode.before, pageId, rootId, main.node.id)),
+    // 컴포넌트 속성이 정하는 글자·보이기는 메인 값이 아니라 인스턴스의 속성 값으로 다시 맞춘다.
+    (current) => applyAllInstanceProps(current, pageId, rootId)
   ]);
 }
 
@@ -294,6 +304,11 @@ function addMissingShapes(doc: DesignDocument, pageId: string, rootId: string, m
   return composeTransactions(doc, steps);
 }
 
+/** 컴포넌트 속성이 정하는 속성인지. 글자 속성을 쓰는 도형의 text·spans, 보이기 속성을 쓰는 도형의 hidden은 메인에서 복사하지 않는다. */
+export function propDriven(node: DesignNode, attr: string): boolean {
+  return (Boolean(node.propRefs?.text) && (attr === 'text' || attr === 'spans')) || (Boolean(node.propRefs?.visible) && attr === 'hidden');
+}
+
 function copyUntouchedAttrs(doc: DesignDocument, pageId: string, rootId: string, mainId: string): Transaction {
   const pair = pairOf(doc, pageId, rootId, mainId);
   if (!pair) return EMPTY_TRANSACTION;
@@ -304,6 +319,7 @@ function copyUntouchedAttrs(doc: DesignDocument, pageId: string, rootId: string,
     for (const group of NON_GEOMETRY_GROUPS) {
       if (node.touched?.includes(group) || (node.id === rootId && ROOT_LOCAL_GROUPS.has(group))) continue;
       for (const attr of SYNC_GROUPS[group]) {
+        if (propDriven(node, attr)) continue;
         const value = (source as unknown as Record<string, unknown>)[attr];
         if (!same((node as unknown as Record<string, unknown>)[attr], value)) patch[attr] = value;
       }
@@ -493,7 +509,7 @@ export function touchedAgainstMain(node: DesignNode, main: DesignNode, root: Des
   const groups: SyncGroup[] = [];
   for (const group of NON_GEOMETRY_GROUPS) {
     if (node === root && ROOT_LOCAL_GROUPS.has(group)) continue;
-    if ((SYNC_GROUPS[group] as readonly string[]).some((attr) => !same((node as unknown as Record<string, unknown>)[attr], (main as unknown as Record<string, unknown>)[attr]))) groups.push(group);
+    if ((SYNC_GROUPS[group] as readonly string[]).some((attr) => !propDriven(node, attr) && !same((node as unknown as Record<string, unknown>)[attr], (main as unknown as Record<string, unknown>)[attr]))) groups.push(group);
   }
   const close = (a: number, b: number): boolean => Math.abs(a - b) <= 0.5;
   const rootResized = !close(root.width, mainRoot.width) || !close(root.height, mainRoot.height);

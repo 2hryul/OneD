@@ -1,11 +1,13 @@
 import { parseFig, resolveVectorNodePaths, type FigDocument, type FigNode, type FigPaint } from 'openfig-core';
-import { isContainer, pageFromNodes, parseVariantName, type Component, type DesignDocument, type Layout, type Matrix, type NodeInput, type NodeType, type Page, type Token } from './model.ts';
+import { TOKEN_SLOT_TYPE, isContainer, pageFromNodes, parseVariantName, type Component, type DesignDocument, type Layout, type Matrix, type NodeInput, type NodeType, type Page, type Token, type TokenSlot } from './model.ts';
 import { topInstanceRoot, touchedAgainstMain } from './components.ts';
 import { applyPoint, cleanMatrix, linearPart, multiply } from './geometry.ts';
 import type { AssetRecord } from './assets.ts';
 import { figColor, figEffects, figPaints, figStrokes, figTextStyle, type ImportIssue, type StyleSink } from './figStyles.ts';
 import { vectorNetworkPaths } from './vectorNetwork.ts';
 import { figConstraints, figItem, figLayout } from './figLayout.ts';
+import { applyProps, collectProps, componentPropsOf, instanceValues, nodePropRefs, scopeOf, type FigPropAssignment, type PropScope, type PropValues } from './figProps.ts';
+import { ancestorModes, boundVariables, variableIndex, variableToken, withModes, withVariableColors, type ModeMap, type VariableIndex } from './figVariables.ts';
 
 export type { ImportIssue } from './figStyles.ts';
 
@@ -21,7 +23,7 @@ export interface ImportReport {
   /** Components 페이지에 만든 메인 컴포넌트 수와, 메인에 연결한 인스턴스 수. */
   components: number;
   linkedInstances: number;
-  /** Figma 채우기·선 스타일에서 만든 색 토큰 수. */
+  /** Figma 채우기·선 스타일과 변수에서 만든 토큰 수. */
   tokens: number;
 }
 
@@ -104,7 +106,7 @@ export function importFigNode(fig: FigDocument, rootId: string): FigImportResult
   if (!root.size) throw new Error('크기가 없는 노드는 가져올 수 없습니다. 프레임을 선택하세요.');
   const state = createState(fig);
   const rootWorld = linearPart(figMatrix(root));
-  walk(state, { source: root, id: rootId, parentId: null, world: rootWorld, isRoot: true, symbolTrail: new Set(), overrides: [] });
+  walk(state, { source: root, id: rootId, parentId: null, world: rootWorld, isRoot: true, symbolTrail: new Set(), overrides: [], modes: ancestorModes(fig, root) });
   finishOverrideReport(state);
   // walk가 부모를 먼저 방문하므로 형제 순서가 Figma 레이어 순서(아래에서 위)와 같다.
   const frameNodes = state.nodes;
@@ -145,7 +147,7 @@ function importMains(state: WalkState): MainImport {
     const rootId = parent?.isStateGroup ? `set:${guidId(parent.guid)}` : `main:${symbolId}`;
     const start = result.nodes.length;
     state.nodes = result.nodes;
-    walk(state, { source, id: rootId, parentId: null, world: linearPart(figMatrix(source)), isRoot: true, symbolTrail: new Set([symbolId]), overrides: [] });
+    walk(state, { source, id: rootId, parentId: null, world: linearPart(figMatrix(source)), isRoot: true, symbolTrail: new Set([symbolId]), overrides: [], modes: ancestorModes(state.fig, source) });
     // 메인들을 세로로 늘어놓는다. 가져오기는 루트를 원점에 두므로 이번에 추가된 도형만 아래로 민다.
     for (const node of result.nodes.slice(start)) node.y += offsetY;
     offsetY += (source.size?.y ?? 0) + 200;
@@ -161,7 +163,7 @@ function registerMains(state: WalkState, source: FigNode, rootId: string, result
   if (!source.isStateGroup) {
     const id = guidId(source.guid);
     result.mainIdOf.set(id, rootId);
-    result.components[id] = { id, name: source.name, mainId: rootId, pageId: COMPONENTS_PAGE };
+    result.components[id] = { id, name: source.name, mainId: rootId, pageId: COMPONENTS_PAGE, ...componentPropsOf(scopeOf(state.fig, source)) };
     return;
   }
   result.setIds.add(rootId);
@@ -171,7 +173,7 @@ function registerMains(state: WalkState, source: FigNode, rootId: string, result
     const mainId = `${rootId}/${id}`;
     if (!result.nodes.some((node) => node.id === mainId)) continue;
     result.mainIdOf.set(id, mainId);
-    result.components[id] = { id, name: source.name, mainId, pageId: COMPONENTS_PAGE, setId: rootId, variant: parseVariantName(child.name) ?? { 'Property 1': child.name } };
+    result.components[id] = { id, name: source.name, mainId, pageId: COMPONENTS_PAGE, setId: rootId, variant: parseVariantName(child.name) ?? { 'Property 1': child.name }, ...componentPropsOf(scopeOf(state.fig, child)) };
   }
 }
 
@@ -224,6 +226,8 @@ interface WalkState {
   /** Figma 채우기 스타일 키 → 스타일 노드. */
   styles: Map<string, FigNode>;
   tokens: Map<string, Token>;
+  /** 파일의 Figma 변수 표. 변수를 쓰는 노드를 처음 만날 때 만든다. */
+  variables?: VariableIndex;
   nodes: NodeInput[];
   report: ImportReport;
   overrides: FigOverride[];
@@ -231,52 +235,8 @@ interface WalkState {
   hiddenTargets: Set<string>;
 }
 
-/** 컴포넌트 속성 값(속성 정의 id → 값). 텍스트 속성은 characters, 불리언 속성은 bool이다. */
-type PropValues = Map<string, { text?: string; bool?: boolean }>;
-
-interface WalkInput { source: FigNode; id: string; parentId: string | null; world: Matrix; isRoot: boolean; symbolTrail: Set<string>; overrides: FigOverride[]; parentLayout?: Layout; props?: PropValues }
-
-interface FigPropAssignment { defID?: Guid; value?: { textValue?: { characters?: string }; boolValue?: boolean } }
-interface FigPropRef { defID?: Guid; componentPropNodeField?: string }
-
-/**
- * 인스턴스의 컴포넌트 속성 값을 모은다(Figma component properties). 바깥 인스턴스에서 물려받은 값 위에 이 인스턴스의 값과,
- * override로 들어온 값(중첩 인스턴스의 속성을 바깥에서 바꾼 경우)을 차례로 덮는다.
- */
-function collectProps(inherited: PropValues | undefined, lists: ReadonlyArray<FigPropAssignment[] | undefined>): PropValues {
-  const props: PropValues = new Map(inherited);
-  for (const list of lists) for (const item of list ?? []) {
-    if (!item.defID || !item.value) continue;
-    const text = item.value.textValue?.characters;
-    props.set(guidId(item.defID), text !== undefined ? { text } : { bool: item.value.boolValue });
-  }
-  return props;
-}
-
-/**
- * 노드가 참조하는 컴포넌트 속성을 적용한다. TEXT_DATA는 글자, VISIBLE은 보이기다.
- * 글자가 바뀌면 글자별 스타일 표는 길이가 맞을 때만 남긴다(맞지 않으면 첫 스타일로 그린다).
- * 인스턴스 교체(INSTANCE_SWAP)는 아직 지원하지 않아 보고만 남긴다.
- */
-function applyPropRefs(state: WalkState, node: FigNode, id: string, props: PropValues | undefined): FigNode {
-  const refs = (node as unknown as { componentPropRefs?: FigPropRef[] }).componentPropRefs;
-  if (!refs?.length || !props?.size) return node;
-  let next = node;
-  for (const ref of refs) {
-    const value = ref.defID ? props.get(guidId(ref.defID)) : undefined;
-    if (!value) continue;
-    if (ref.componentPropNodeField === 'TEXT_DATA' && value.text !== undefined) {
-      const textData = (next.textData ?? {}) as { characters?: string; characterStyleIDs?: number[] };
-      const keepStyles = (textData.characterStyleIDs?.length ?? 0) === value.text.length;
-      next = { ...next, textData: { ...textData, characters: value.text, ...(keepStyles ? {} : { characterStyleIDs: [] }) } } as FigNode;
-    } else if (ref.componentPropNodeField === 'VISIBLE' && value.bool !== undefined) {
-      next = { ...next, visible: value.bool };
-    } else if (ref.componentPropNodeField === 'OVERRIDDEN_SYMBOL_ID') {
-      state.report.issues.push({ nodeId: id, name: node.name || node.type, kind: 'prop-unsupported', detail: '인스턴스 교체 속성은 아직 지원하지 않음. 기본 컴포넌트로 표시' });
-    }
-  }
-  return next;
-}
+/** scope: 이 노드를 가진 컴포넌트(세트)의 속성 범위. props: 바깥 인스턴스들이 정한 속성 값. */
+interface WalkInput { source: FigNode; id: string; parentId: string | null; world: Matrix; isRoot: boolean; symbolTrail: Set<string>; overrides: FigOverride[]; parentLayout?: Layout; props?: PropValues; scope?: PropScope; modes?: ModeMap }
 
 function createState(fig: FigDocument): WalkState {
   const report: ImportReport = { imported: 0, expandedInstances: 0, unresolvedInstances: 0, approximatedShapes: 0, appliedOverrides: 0, unappliedOverrides: 0, issues: [], components: 0, linkedInstances: 0, tokens: 0 };
@@ -299,7 +259,8 @@ function walk(state: WalkState, input: WalkInput): void {
   const matches = pathMatcher(source);
   const own = overrides.filter((item) => matches(item.path[0]) && item.path.length === 1);
   // 컴포넌트 속성을 먼저 적용하고, 사용자가 직접 바꾼 override가 그 위를 덮는다.
-  const effective = Object.assign({}, applyPropRefs(state, source, id, input.props), ...own.map((item) => item.patch)) as FigNode;
+  const swapReport = (): void => { state.report.issues.push({ nodeId: id, name: source.name || source.type, kind: 'prop-unsupported', detail: '인스턴스 교체 속성은 아직 지원하지 않음. 기본 컴포넌트로 표시' }); };
+  const effective = Object.assign({}, applyProps(source, input.scope, input.props, swapReport), ...own.map((item) => item.patch)) as FigNode;
   for (const item of own) state.applied.add(item.id);
   const remaining = overrides.flatMap((item) => matches(item.path[0]) ? (item.path.length > 1 ? [{ ...item, path: item.path.slice(1) }] : []) : [item]);
   // 숨긴 노드도 hidden으로 가져온다. 메인에서는 숨겼지만 인스턴스에서 override로 보이게 한 노드가 메인 쪽 짝을 가져야 동기화가 지우지 않는다.
@@ -307,20 +268,28 @@ function walk(state: WalkState, input: WalkInput): void {
     for (const item of overrides) if (matches(item.path[0]) && item.path.length > 1) state.hiddenTargets.add(item.id);
     return;
   }
+  // 이 노드가 고른 변수 모드(라이트·다크 등)는 자기와 자손의 변수 값에 적용된다.
+  const modes = withModes(input.modes, effective);
   const instance = effective.type === 'INSTANCE' ? prepareInstance(state, effective, id) : null;
   const shaped = instance ? ({ ...instance.rootPatch, ...effective } as FigNode) : effective;
   const world = input.isRoot ? input.world : multiply(input.world, figMatrix(shaped));
-  const converted = convertNode(state, shaped, id, input.parentId, world, input.parentLayout);
+  const converted = convertNode(state, resolveColors(state, shaped, modes), id, input.parentId, world, input.parentLayout, modes, input.scope);
   state.nodes.push(converted);
   state.report.imported++;
   // 불리언 연산 등 벡터로 바꾼 노드의 자식(피연산자)은 이미 경로에 들어 있으므로 따로 가져오지 않는다.
   if (!isContainer(converted)) return;
   for (const child of childrenOf(state.fig, nodeId(source))) {
-    walk(state, { source: child, id: `${id}/${nodeId(child)}`, parentId: id, world, isRoot: false, symbolTrail: input.symbolTrail, overrides: remaining, parentLayout: converted.layout, props: input.props });
+    walk(state, { source: child, id: `${id}/${nodeId(child)}`, parentId: id, world, isRoot: false, symbolTrail: input.symbolTrail, overrides: remaining, parentLayout: converted.layout, props: input.props, modes, scope: effective.type === 'SYMBOL' ? scopeOf(state.fig, source) : input.scope });
   }
   if (instance) {
     const assignments = [source, ...own.map((item) => item.patch)].map((patch) => (patch as unknown as { componentPropAssignments?: FigPropAssignment[] }).componentPropAssignments);
-    expandInstance(state, shaped, id, world, { trail: input.symbolTrail, own: instance.own, remaining, layout: converted.layout, props: collectProps(input.props, assignments) });
+    const symbolGuid = shaped.symbolData?.symbolID as Guid | undefined;
+    const scope = scopeOf(state.fig, symbolGuid ? state.fig.nodeMap.get(guidId(symbolGuid)) : undefined);
+    const props = collectProps(input.props, scope, assignments);
+    // 편집기에서 속성 값을 고칠 수 있도록 이 인스턴스가 정한 값을 인스턴스 루트에 남긴다(글자·보이기는 이미 적용돼 있다).
+    const propValues = instanceValues(scope, collectProps(undefined, scope, assignments));
+    if (propValues) converted.propValues = propValues;
+    expandInstance(state, shaped, id, world, { trail: input.symbolTrail, own: instance.own, remaining, layout: converted.layout, props, modes, scope });
   }
 }
 
@@ -349,7 +318,7 @@ function prepareInstance(state: WalkState, instance: FigNode, id: string): Prepa
   return { own: [...all.filter((item) => !atRoot.includes(item)), ...derived], rootPatch };
 }
 
-interface ExpandContext { trail: Set<string>; own: FigOverride[]; remaining: FigOverride[]; layout?: Layout; props?: PropValues }
+interface ExpandContext { trail: Set<string>; own: FigOverride[]; remaining: FigOverride[]; layout?: Layout; props?: PropValues; modes?: ModeMap; scope?: PropScope }
 
 function expandInstance(state: WalkState, instance: FigNode, id: string, world: Matrix, context: ExpandContext): void {
   const { trail: symbolTrail, own, remaining } = context;
@@ -364,11 +333,11 @@ function expandInstance(state: WalkState, instance: FigNode, id: string, world: 
   state.instanceSymbols.set(id, symbolId);
   const trail = new Set(symbolTrail).add(symbolId);
   for (const child of childrenOf(state.fig, symbolId)) {
-    walk(state, { source: child, id: `${id}/${nodeId(child)}`, parentId: id, world, isRoot: false, symbolTrail: trail, overrides: [...own, ...remaining], parentLayout: context.layout, props: context.props });
+    walk(state, { source: child, id: `${id}/${nodeId(child)}`, parentId: id, world, isRoot: false, symbolTrail: trail, overrides: [...own, ...remaining], parentLayout: context.layout, props: context.props, modes: context.modes, scope: context.scope });
   }
 }
 
-function convertNode(state: WalkState, node: FigNode, id: string, parentId: string | null, world: Matrix, parentLayout?: Layout): NodeInput {
+function convertNode(state: WalkState, node: FigNode, id: string, parentId: string | null, world: Matrix, parentLayout?: Layout, modes?: ModeMap, scope?: PropScope): NodeInput {
   const type = toType(node);
   const layout = type === 'frame' ? figLayout(state.sink, node, id) : undefined;
   const item = figItem(node, type, layout, parentLayout);
@@ -385,7 +354,7 @@ function convertNode(state: WalkState, node: FigNode, id: string, parentId: stri
     ...(strokes.length ? { strokes } : {}),
     ...(effects.length ? { effects } : {}),
     ...(node.opacity !== undefined && node.opacity < 1 ? { opacity: node.opacity } : {}),
-    ...(node.cornerRadius ? { radius: node.cornerRadius } : {}),
+    ...cornerRadius(state, node, id),
     ...(type === 'frame' && node.frameMaskDisabled ? { clipContent: false } : {}),
     // Figma "마스크로 쓰기". 같은 부모 안에서 위의 형제를 이 도형 모양으로 자른다.
     ...((node as { mask?: boolean }).mask ? { mask: true } : {}),
@@ -395,9 +364,13 @@ function convertNode(state: WalkState, node: FigNode, id: string, parentId: stri
     ...(item ? { item } : {}),
     ...(constraints ? { constraints } : {}),
     ...styleTokens(state, node),
+    ...nodePropRefs(scope, node),
+    // variableTokens는 아래에서 base 값과 비교해 합친다.
     ...(type === 'text' ? figTextStyle(state.sink, node, id) : {})
   };
   if (type === 'vector') { base.vectorPaths = vectorPaths(state, node, id, width, height); base.viewBox = { width, height }; }
+  const variables = variableTokens(state, node, id, base, modes);
+  if (Object.keys(variables).length) base.tokens = { ...base.tokens, ...variables };
   return base;
 }
 
@@ -467,6 +440,69 @@ function styleTokens(state: WalkState, node: FigNode): { tokens?: Partial<Record
   if (fill && node.fillPaints?.some((paint) => paint.type === 'SOLID' && paint.visible !== false)) refs.fill = fill;
   if (stroke && node.strokePaints?.some((paint) => paint.type === 'SOLID' && paint.visible !== false)) refs.stroke = stroke;
   return Object.keys(refs).length ? { tokens: refs } : {};
+}
+
+/** 변수에 연결된 채우기·선 색을 이 자리의 변수 모드 값으로 바꾼 노드. 연결이 없으면 그대로다. */
+function resolveColors(state: WalkState, node: FigNode, modes: ModeMap | undefined): FigNode {
+  if (!node.fillPaints?.some((paint) => (paint as { colorVar?: unknown }).colorVar) && !node.strokePaints?.some((paint) => (paint as { colorVar?: unknown }).colorVar)) return node;
+  state.variables ??= variableIndex(state.fig);
+  return { ...node, fillPaints: withVariableColors(state.variables, node.fillPaints as never[], modes), strokePaints: withVariableColors(state.variables, node.strokePaints as never[], modes) } as FigNode;
+}
+
+/**
+ * 모서리 반경. cornerRadius가 없으면 네 모서리 값(rectangle*CornerRadius)을 쓴다. 모두 같으면 그 값,
+ * 다르면 문서 모델이 반경 하나만 가지므로 가장 큰 값으로 근사하고 보고한다.
+ */
+function cornerRadius(state: WalkState, node: FigNode, id: string): { radius?: number } {
+  const raw = node as unknown as Record<string, unknown>;
+  if (typeof node.cornerRadius === 'number' && node.cornerRadius > 0) return { radius: node.cornerRadius };
+  const corners = ['rectangleTopLeftCornerRadius', 'rectangleTopRightCornerRadius', 'rectangleBottomLeftCornerRadius', 'rectangleBottomRightCornerRadius'].map((key) => raw[key]).filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
+  const largest = Math.max(0, ...corners);
+  if (largest <= 0) return {};
+  if (corners.some((value) => Math.abs(value - largest) > 0.01)) state.report.issues.push({ nodeId: id, name: node.name || node.type, kind: 'radius-approximated', detail: `모서리마다 다른 반경(${corners.join(', ')})을 ${largest}로 근사` });
+  return { radius: largest };
+}
+
+/** 노드의 현재 값(토큰 자리별). 변수 토큰을 연결해도 화면이 바뀌지 않는지 확인하는 데 쓴다. */
+function slotValue(node: NodeInput, slot: TokenSlot): string | number | undefined {
+  switch (slot) {
+    case 'fill': { const paint = node.fills.find((item) => item.type === 'solid'); return paint?.type === 'solid' ? paint.color : undefined; }
+    case 'stroke': return node.strokes?.[0]?.color;
+    case 'radius': return node.radius ?? 0;
+    case 'fontSize': return node.fontSize;
+    case 'gap': return node.layout?.type === 'grid' ? node.layout.columnGap : node.layout?.gap;
+  }
+}
+
+function sameValue(a: string | number | undefined, b: string | number): boolean {
+  if (typeof b === 'number') return typeof a === 'number' && Math.abs(a - b) < 0.01;
+  const norm = (value: string): string => value.toLowerCase().replace(/^(#[0-9a-f]{6})ff$/, '$1');
+  return typeof a === 'string' && norm(a) === norm(b);
+}
+
+/**
+ * Figma 변수를 토큰으로 만들고 연결한다. 토큰 값은 이 노드 자리에서 적용되는 모드로 푼 값이다.
+ * 토큰은 문서 전체에서 값이 하나라서, 이미 다른 모드 값으로 만든 토큰이거나 노드의 실제 값과 다르면 연결하지 않고 보고만 남긴다(화면을 바꾸지 않기 위해).
+ */
+function variableTokens(state: WalkState, node: FigNode, id: string, base: NodeInput, modes: ModeMap | undefined): Partial<Record<TokenSlot, string>> {
+  state.variables ??= variableIndex(state.fig);
+  const refs: Partial<Record<TokenSlot, string>> = {};
+  for (const [slot, variable] of Object.entries(boundVariables(state.variables, node)) as Array<[TokenSlot, FigNode]>) {
+    const token = variableToken(state.variables, variable, modes);
+    if (!token || token.type !== TOKEN_SLOT_TYPE[slot]) continue;
+    const existing = state.tokens.get(token.id);
+    const value = existing?.value ?? token.value;
+    const current = slotValue(base, slot);
+    // 벡터의 색은 경로 데이터에 있어 이 자리가 비어 있다. 연결할 곳이 없으므로 조용히 넘어간다.
+    if (current === undefined) continue;
+    if (!sameValue(current, value)) {
+      state.report.issues.push({ nodeId: id, name: node.name || node.type, kind: 'token-mode-mismatch', detail: `변수 ${token.name}: 이 자리 값(${String(current)})과 토큰 값(${String(value)})이 달라 연결하지 않음(다른 모드 값일 수 있음)` });
+      continue;
+    }
+    if (!existing) state.tokens.set(token.id, token);
+    refs[slot] = token.id;
+  }
+  return refs;
 }
 
 function styleToken(state: WalkState, key: string): string | null {

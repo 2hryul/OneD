@@ -209,8 +209,10 @@ function withTypography(style: Style, node: DesignNode, vars: TokenVars): Style 
 interface ComponentPlan {
   name: string;
   members: Component[];
-  /** 텍스트 레이어 이름 → prop 이름. variant끼리 같은 이름의 텍스트는 같은 prop을 쓴다. */
+  /** 텍스트 레이어 이름 → prop 이름. variant끼리 같은 이름의 텍스트는 같은 prop을 쓴다. 컴포넌트 속성에 연결된 텍스트는 빠진다. */
   textProps: Map<string, string>;
+  /** 컴포넌트 속성 id → prop 이름·종류·기본값. 텍스트 속성은 문자열 prop, 불리언 속성은 조건부 렌더 prop이 된다. */
+  componentProps: Map<string, { prop: string; type: 'text' | 'boolean'; defaultValue: string | boolean }>;
   variantProps: Array<{ key: string; prop: string; values: string[]; boolean: boolean }>;
   code: string[];
 }
@@ -258,10 +260,15 @@ interface RenderContext {
   choice?: { type: 'radio' | 'checkbox'; state: ControlState };
   /** 이 렌더가 useId로 만든 fieldId를 쓰는지. */
   usesId: boolean;
+  /** 불리언 컴포넌트 속성으로 보이기가 정해지는 도형의 prop 이름과 기본값. 조건부 렌더로 낸다. */
+  visibleProp?: (node: DesignNode) => { prop: string; defaultValue: boolean } | undefined;
 }
 
-function hiddenIn(page: Page, rootId: string): Set<string> {
-  return new Set(walkPage(page, [rootId]).filter((node) => node.hidden && node.id !== rootId).flatMap((node) => walkPage(page, [node.id]).map((item) => item.id)));
+/**
+ * 내보내지 않을 숨긴 도형. 불리언 속성으로 보이기가 정해지는 도형(keep)은 숨겨져 있어도 남겨 조건부 렌더로 낸다.
+ */
+function hiddenIn(page: Page, rootId: string, keep: (node: DesignNode) => boolean = () => false): Set<string> {
+  return new Set(walkPage(page, [rootId]).filter((node) => node.hidden && node.id !== rootId && !keep(node)).flatMap((node) => walkPage(page, [node.id]).map((item) => item.id)));
 }
 
 function uniqueName(state: ExportState, base: string): string {
@@ -392,6 +399,12 @@ function imageSource(state: ExportState, assetId: string): string {
 function renderNode(node: DesignNode, parent: DesignNode | null, depth: number, context: RenderContext, phrasing = false): string[] {
   const indent = '  '.repeat(depth);
   const root = node.id === context.rootId;
+  const toggle = root ? undefined : context.visibleProp?.(node);
+  if (toggle) {
+    // 불리언 속성: prop이 거짓이면 그리지 않는다. 기본값은 컴포넌트 속성의 기본값이다.
+    const inner = renderNode(node, parent, depth + 1, { ...context, visibleProp: undefined, rules: context.rules }, phrasing);
+    return [`${indent}{(props.${toggle.prop} ?? ${toggle.defaultValue}) && (`, ...inner, `${indent})}`];
+  }
   if (node.componentId && !node.mainInstance && !root) return [`${indent}${usage(context, node, parent)}`];
   const element = elementOf(node, phrasing, context);
   const className = root ? context.block : uniqueIn(context.state.classes, `${context.block}__${kebab(node.name)}`);
@@ -509,7 +522,7 @@ function ensurePlan(state: ExportState, componentId: string): ComponentPlan | nu
   const existing = state.plans.get(key);
   if (existing) return existing;
   const members = component.setId ? Object.values(state.doc.components).filter((item) => item.setId === component.setId) : [component];
-  const plan: ComponentPlan = { name: uniqueName(state, identifier(component.name)), members, textProps: new Map(), variantProps: [], code: [] };
+  const plan: ComponentPlan = { name: uniqueName(state, identifier(component.name)), members, textProps: new Map(), componentProps: new Map(), variantProps: [], code: [] };
   state.plans.set(key, plan);
   const taken = new Set(['style', 'className']);
   const propName = (label: string): string => {
@@ -527,12 +540,21 @@ function ensurePlan(state: ExportState, componentId: string): ComponentPlan | nu
   for (const member of members) {
     const main = mainOf(state.doc, member);
     if (!main) continue;
+    for (const prop of member.props ?? []) {
+      if (!plan.componentProps.has(prop.id)) plan.componentProps.set(prop.id, { prop: propName(prop.name), type: prop.type, defaultValue: prop.defaultValue });
+    }
     for (const node of walkPage(main.page, [main.node.id])) {
-      if (node.type === 'text' && !insideNestedInstance(main.page, node, main.node.id) && !plan.textProps.has(node.name)) plan.textProps.set(node.name, propName(node.name));
+      if (node.type === 'text' && !node.propRefs?.text && !insideNestedInstance(main.page, node, main.node.id) && !plan.textProps.has(node.name)) plan.textProps.set(node.name, propName(node.name));
     }
   }
   plan.code = componentCode(state, plan);
   return plan;
+}
+
+/** 도형의 속성 참조가 속한 가장 가까운 조상 컴포넌트 루트 id(자기 자신 제외). */
+function propOwnerId(page: Page, node: DesignNode): string | undefined {
+  for (let id = node.parentId; id; id = page.objects[id]?.parentId ?? null) if (page.objects[id]?.componentId) return id;
+  return undefined;
 }
 
 function mainOf(doc: DesignDocument, component: Component): { page: Page; node: DesignNode } | null {
@@ -547,14 +569,14 @@ function insideNestedInstance(page: Page, node: DesignNode, rootId: string): boo
 }
 
 /** 루트를 렌더할 때의 선택 사항. member가 있으면 컴포넌트(variant 하나)를 렌더하는 중이다. fluid는 화면 루트다. */
-interface RootOptions { textProp: RenderContext['textProp']; member?: Component; fluid?: boolean }
+interface RootOptions { textProp: RenderContext['textProp']; member?: Component; fluid?: boolean; visibleProp?: RenderContext['visibleProp'] }
 
 /** 루트 하나를 렌더하고, 만든 CSS 규칙을 파일 규칙 뒤에 붙인다. 안에서 처음 쓰인 컴포넌트의 규칙은 이미 앞에 붙어 있다. */
 function renderRoot(state: ExportState, page: Page, root: DesignNode, blockName: string, options: RootOptions): { body: string[]; usesId: boolean } {
-  const hidden = hiddenIn(page, root.id);
+  const hidden = hiddenIn(page, root.id, (node) => Boolean(options.visibleProp?.(node)));
   const variant = options.member?.variant;
   const context: RenderContext = {
-    state, page, hidden, rootId: root.id, textProp: options.textProp, block: uniqueIn(state.classes, kebab(blockName)), rules: [], inputs: new Map(),
+    state, page, hidden, rootId: root.id, textProp: options.textProp, visibleProp: options.visibleProp, block: uniqueIn(state.classes, kebab(blockName)), rules: [], inputs: new Map(),
     rootRoleName: options.member?.name, component: Boolean(options.member), fluid: Boolean(options.fluid), usesId: false,
     field: options.member ? planField(page, hidden, root, variant) : undefined,
     choice: options.member ? planChoice(page, root, options.member.name, variant) : undefined
@@ -575,6 +597,7 @@ function componentCode(state: ExportState, plan: ComponentPlan): string[] {
     '  className?: string;',
     '  style?: CSSProperties;',
     ...plan.variantProps.map((item) => `  ${item.prop}?: ${item.boolean ? 'boolean' : item.values.map((value) => JSON.stringify(value)).join(' | ')};`),
+    ...[...plan.componentProps.values()].map((item) => `  ${item.prop}?: ${item.type === 'boolean' ? 'boolean' : 'string'};`),
     ...[...plan.textProps.values()].map((prop) => `  ${prop}?: string;`)
   ];
   const lines = [`export interface ${plan.name}Props {`, ...props, '}', ''];
@@ -592,7 +615,18 @@ function componentCode(state: ExportState, plan: ComponentPlan): string[] {
   for (const { member, fn } of renderers) {
     const main = mainOf(state.doc, member);
     if (!main) continue;
-    const rendered = renderRoot(state, main.page, main.node, fn, { member, textProp: (node) => (insideNestedInstance(main.page, node, main.node.id) ? undefined : plan.textProps.get(node.name)) });
+    const own = (node: DesignNode): boolean => !insideNestedInstance(main.page, node, main.node.id);
+    const textProp = (node: DesignNode): string | undefined => {
+      if (!own(node)) return undefined;
+      const bound = node.propRefs?.text ? plan.componentProps.get(node.propRefs.text) : undefined;
+      return bound?.prop ?? (node.propRefs?.text ? undefined : plan.textProps.get(node.name));
+    };
+    const visibleProp = (node: DesignNode): { prop: string; defaultValue: boolean } | undefined => {
+      const bound = node.propRefs?.visible ? plan.componentProps.get(node.propRefs.visible) : undefined;
+      // 이 메인에 속한 참조만(중첩 인스턴스 안의 참조는 그 컴포넌트의 속성이다).
+      return bound?.type === 'boolean' && propOwnerId(main.page, node) === main.node.id ? { prop: bound.prop, defaultValue: bound.defaultValue === true } : undefined;
+    };
+    const rendered = renderRoot(state, main.page, main.node, fn, { member, textProp, visibleProp });
     lines.push(...functionLines(`${plan.members.length > 1 ? '' : 'export '}function ${fn}(props: ${plan.name}Props)`, rendered));
   }
   return lines;
@@ -611,8 +645,13 @@ function usage(context: RenderContext, node: DesignNode, parent: DesignNode | nu
     const value = component.variant?.[item.key];
     if (value !== undefined) attrs.push(item.boolean ? `${item.prop}={${value.toLowerCase() === 'true'}}` : `${item.prop}=${JSON.stringify(value)}`);
   }
+  // 인스턴스가 정한 컴포넌트 속성 값을 prop으로 넘긴다.
+  for (const [propId, value] of Object.entries(node.propValues ?? {})) {
+    const bound = plan.componentProps.get(propId);
+    if (bound) attrs.push(typeof value === 'boolean' ? `${bound.prop}={${value}}` : `${bound.prop}=${JSON.stringify(value)}`);
+  }
   for (const text of walkPage(page, [node.id])) {
-    if (text.type !== 'text' || insideNestedInstance(page, text, node.id)) continue;
+    if (text.type !== 'text' || text.propRefs?.text || insideNestedInstance(page, text, node.id)) continue;
     const main = text.shapeRef ? findMainShape(state.doc, text.shapeRef) : undefined;
     const prop = plan.textProps.get(main?.name ?? text.name);
     if (prop && main && text.text !== main.text) attrs.push(`${prop}=${JSON.stringify(text.text ?? '')}`);

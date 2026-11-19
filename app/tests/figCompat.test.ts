@@ -31,7 +31,7 @@ describe('values Figma stores as Infinity or NaN', () => {
 describe('instances from files that use node ids in override paths', () => {
   /** 컴포넌트(글자 Label, 아이콘 Icon)와 그 인스턴스. 인스턴스는 override 또는 컴포넌트 속성으로 글자를 바꾼다. */
   function instanceFile(instancePatch: Record<string, unknown>): FigDocument {
-    const symbol = f(10, 'SYMBOL', 'Button', { componentPropDefs: [{ id: { sessionID: 3, localID: 7 }, name: 'label', type: 'TEXT' }] });
+    const symbol = f(10, 'SYMBOL', 'Button', { componentPropDefs: [{ id: { sessionID: 3, localID: 7 }, name: 'label', type: 'TEXT' }, { id: { sessionID: 3, localID: 8 }, name: 'show label', type: 'BOOL' }] });
     const label = f(11, 'TEXT', 'Label', { textData: text('Button'), parentIndex: { position: '"' }, componentPropRefs: [{ defID: { sessionID: 3, localID: 7 }, componentPropNodeField: 'TEXT_DATA' }, { defID: { sessionID: 3, localID: 8 }, componentPropNodeField: 'VISIBLE' }] });
     const icon = f(12, 'RECTANGLE', 'Icon', { parentIndex: { position: '!' } });
     const page = f(20, 'FRAME', 'Page', { size: { x: 300, y: 100 } });

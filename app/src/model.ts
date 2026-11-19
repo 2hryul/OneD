@@ -118,6 +118,10 @@ export interface DesignNode {
   shapeRef?: string;
   /** 인스턴스에서 사용자가 바꾼 속성 묶음. 여기 든 묶음은 메인이 바뀌어도 덮어쓰지 않는다(Penpot touched). */
   touched?: SyncGroup[];
+  /** 메인 컴포넌트 안 도형(과 인스턴스의 대응 도형)이 쓰는 컴포넌트 속성 id. */
+  propRefs?: PropRefs;
+  /** 인스턴스 루트에만 있다. 컴포넌트 속성 id → 이 인스턴스의 값. 없는 속성은 기본값을 쓴다. */
+  propValues?: Record<string, string | boolean>;
   /** 속성에 연결된 디자인 토큰 id. 토큰 값이 바뀌면 이 속성도 바뀐다. */
   tokens?: Partial<Record<TokenSlot, string>>;
   /** 프로토타입 상호작용. 보기 모드에서만 동작한다. */
@@ -153,7 +157,18 @@ export interface Component {
   pageId: string;
   setId?: string;
   variant?: Record<string, string>;
+  /** 컴포넌트 속성(Figma component properties). 메인 안 도형의 propRefs가 이 id를 가리키고, 인스턴스 루트의 propValues가 값을 정한다. */
+  props?: ComponentProp[];
 }
+
+/**
+ * 컴포넌트 속성 하나. text는 글자, boolean은 보이기다(인스턴스 교체 속성은 아직 없다).
+ * defaultValue는 값을 정하지 않은 인스턴스가 쓰는 값이고, 메인 도형도 이 값으로 그려진다.
+ */
+export interface ComponentProp { id: string; name: string; type: ComponentPropType; defaultValue: string | boolean }
+export type ComponentPropType = 'text' | 'boolean';
+/** 도형이 컴포넌트 속성을 쓰는 자리. text는 글자, visible은 보이기다. */
+export interface PropRefs { text?: string; visible?: string }
 
 export type TokenType = 'color' | 'number';
 export interface Token { id: string; name: string; type: TokenType; value: string | number }
@@ -169,7 +184,7 @@ export const TOKEN_SLOT_TYPE: Record<TokenSlot, TokenType> = { fill: 'color', st
 export const SYNC_GROUPS = {
   name: ['name'],
   fill: ['fills'],
-  content: ['text', 'spans', 'vectorPaths', 'viewBox', 'fillRule', 'path', 'boolOp', 'mask'],
+  content: ['text', 'spans', 'vectorPaths', 'viewBox', 'fillRule', 'path', 'boolOp', 'mask', 'propRefs'],
   visibility: ['hidden'],
   modifiable: ['locked'],
   'text-font': ['fontSize', 'fontFamily', 'fontWeight'],
@@ -183,6 +198,8 @@ export const SYNC_GROUPS = {
   'layout-item': ['item'],
   clip: ['clipContent'],
   tokens: ['tokens'],
+  /** 중첩 인스턴스 루트가 가진 컴포넌트 속성 값. 메인의 중첩 인스턴스에 정한 값이 인스턴스로 내려온다. */
+  props: ['propValues'],
   prototype: ['interactions', 'fixedScroll'],
   geometry: ['x', 'y', 'width', 'height', 'transform']
 } as const satisfies Record<string, readonly string[]>;
@@ -534,7 +551,15 @@ function isComponentFields(node: Record<string, unknown>): boolean {
   const isString = (value: unknown): boolean => typeof value === 'string';
   return optional(node.componentId, isString) && optional(node.mainInstance, isBoolean) && optional(node.componentSet, isBoolean) && optional(node.shapeRef, isString) &&
     optional(node.touched, (value) => isArrayOf(value, (group) => SYNC_GROUP_NAMES.includes(group as SyncGroup))) &&
-    optional(node.tokens, (value) => isRecord(value) && Object.entries(value).every(([slot, id]) => slot in TOKEN_SLOT_TYPE && typeof id === 'string'));
+    optional(node.tokens, (value) => isRecord(value) && Object.entries(value).every(([slot, id]) => slot in TOKEN_SLOT_TYPE && typeof id === 'string')) &&
+    optional(node.propRefs, (value) => isRecord(value) && Object.entries(value).every(([field, id]) => ['text', 'visible'].includes(field) && isString(id))) &&
+    optional(node.propValues, (value) => isRecord(value) && Object.values(value).every((item) => typeof item === 'string' || typeof item === 'boolean'));
+}
+
+/** 컴포넌트 속성 정의 검사. 종류별 기본값 형식(text·swap은 문자열, boolean은 참·거짓)도 본다. */
+function isComponentProp(value: unknown): boolean {
+  return isRecord(value) && typeof value.id === 'string' && typeof value.name === 'string' && ['text', 'boolean'].includes(value.type as string) &&
+    (value.type === 'boolean' ? typeof value.defaultValue === 'boolean' : typeof value.defaultValue === 'string');
 }
 
 /**
@@ -548,6 +573,7 @@ function validateRegistries(doc: DesignDocument): DesignDocument {
     const main = objectsById.get(component.mainId);
     if (!main || main.pageId !== component.pageId || main.node.componentId !== id || !main.node.mainInstance) throw new Error(`Invalid component main - ${id}`);
     if (!optional(component.variant, (value) => isRecord(value) && Object.values(value).every((item) => typeof item === 'string')) || !optional(component.setId, (value) => typeof value === 'string')) throw new Error('Invalid component');
+    if (!optional(component.props, (value) => isArrayOf(value, isComponentProp))) throw new Error(`Invalid component props - ${id}`);
   }
   for (const [id, token] of Object.entries(doc.tokens)) {
     if (!isRecord(token) || token.id !== id || typeof token.name !== 'string' || !['color', 'number'].includes(token.type as string) ||

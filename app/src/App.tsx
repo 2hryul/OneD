@@ -32,7 +32,8 @@ import { figmaNodeId, importFigFile, type ImportReport } from './figmaImport';
 import { base64ToBytes, bytesToBase64, contentId, getAssets, putAssets, readImageSize, referencedAssets, sniffImageMime, type AssetRecord } from './assets';
 import { ImportReportModal } from './report';
 import { AssetsPanel } from './assetsPanel';
-import { ComponentSection, TokenSection } from './componentPanels';
+import { ComponentSection, TokenSection, type PropActions } from './componentPanels';
+import { addComponentProp, propOwner, removeComponentProp, setInstanceProp, updateComponentProp } from './componentProps';
 import { applyToken, combineAsVariants, createComponent, createInstance, detachInstance, resetOverrides, switchVariant } from './components';
 import { loadStoredDocument, readRecovery, saveStoredDocument } from './storage';
 import { PrototypeLinks, PrototypePanel } from './prototypePanels';
@@ -883,14 +884,48 @@ export function App(): JSX.Element {
     if (edit((current) => flattenToPath(current, page.id, selected.id))) setNotice(`${selected.name}을(를) 경로로 바꿨습니다.`);
   };
 
+  /**
+   * 컴포넌트 속성에 연결된 글자를 고치면 도형 대신 속성을 바꾼다(Figma와 같음). 인스턴스 안이면 그 인스턴스의 값, 메인 안이면 기본값이다.
+   * 속성에 연결되지 않은 글자면 false를 돌려 평소처럼 고치게 한다.
+   */
+  const editPropText = (node: DesignNode, text: string): boolean => {
+    const propId = node.propRefs?.text;
+    const owner = propId ? propOwner(page, node) : undefined;
+    const prop = owner?.componentId ? doc.components[owner.componentId]?.props?.find((item) => item.id === propId) : undefined;
+    if (!owner || !prop) return false;
+    edit((current) => (owner.mainInstance ? updateComponentProp(current, owner.componentId!, prop.id, { defaultValue: text }) : setInstanceProp(current, page.id, owner.id, prop.id, text)));
+    return true;
+  };
+
   const finishText = (id: string, text: string | null): void => {
     setEditingId(null);
+    const node = page.objects[id];
+    if (text === null || !node || text === node.text || editPropText(node, text)) return;
     // 구간 스타일은 글자 위치에 묶여 있어 내용이 바뀌면 어긋난다. 내용을 고치면 구간 스타일을 지운다.
-    if (text !== null && page.objects[id] && text !== page.objects[id]!.text) edit((current) => updateShape(current, page.id, id, { text, ...(page.objects[id]!.spans?.length ? { spans: [] } : {}) }));
+    edit((current) => updateShape(current, page.id, id, { text, ...(node.spans?.length ? { spans: [] } : {}) }));
+  };
+
+  /** 컴포넌트 속성 편집. 오류(이름 없음, 메인 밖 도형 등)는 알림으로 보여 준다. */
+  const runProp = (work: (current: DesignDocument) => Transaction): void => {
+    try { edit(work); } catch (error) { setNotice(error instanceof Error ? error.message : '[componentProps] 속성 편집 실패'); }
+  };
+  const propActions: PropActions = {
+    add: (nodeId, field, name) => runProp((current) => addComponentProp(current, page.id, nodeId, field, name, `prop-${crypto.randomUUID()}`)),
+    link: (nodeId, field, propId) => runProp((current) => {
+      const node = current.pages.find((item) => item.id === page.id)?.objects[nodeId];
+      const refs = { ...node?.propRefs, [field]: propId ?? undefined };
+      const clean = Object.fromEntries(Object.entries(refs).filter(([, value]) => value));
+      return updateShape(current, page.id, nodeId, { propRefs: Object.keys(clean).length ? clean : undefined });
+    }),
+    update: (componentId, propId, patch) => runProp((current) => updateComponentProp(current, componentId, propId, patch)),
+    remove: (componentId, propId) => runProp((current) => removeComponentProp(current, componentId, propId)),
+    setValue: (rootId, propId, value) => runProp((current) => setInstanceProp(current, page.id, rootId, propId, value))
   };
 
   /** 속성 패널 편집. 프레임은 위치를 바꾸면 자식도 같이 옮기고, 그룹은 크기를 바꾸면 자식을 같은 비율로 늘린다. */
   const setProperty = (node: DesignNode, patch: Partial<DesignNode>): void => {
+    // 속성에 연결된 글자는 속성 값으로 고친다(캔버스에서 고칠 때와 같은 규칙).
+    if (patch.text !== undefined && Object.keys(patch).length === 1 && editPropText(node, patch.text)) return;
     const { x, y, width, height, ...changed } = patch;
     const rest = changed.text !== undefined && node.spans?.length ? { ...changed, spans: [] } : changed;
     const box = { x: x ?? node.x, y: y ?? node.y, width: width ?? node.width, height: height ?? node.height };
@@ -1175,7 +1210,7 @@ export function App(): JSX.Element {
               onPresent={present} />
             : <div className="nothing-selected"><span>▶</span><strong>프로토타입</strong><p>요소를 선택해 클릭·마우스·지연 트리거를 연결하고, 보기 모드로 실행합니다.</p><button className="wide-action" onClick={present}>▶ 보기 모드로 실행</button></div>)
           : selected ? <PropertiesPanel key={selected.id} node={selected} parent={selected.parentId ? page.objects[selected.parentId] : undefined}
-            header={<ComponentSection doc={doc} page={page} node={selected} onCreate={makeComponent} onSwitchVariant={(componentId) => switchInstanceVariant(selected.id, componentId)} onGoToMain={() => goToMain(selected)} onReset={() => edit((current) => resetOverrides(current, page.id, selected.id))} onDetach={() => edit((current) => detachInstance(current, page.id, selected.id))} />}
+            header={<ComponentSection doc={doc} page={page} node={selected} onCreate={makeComponent} onSwitchVariant={(componentId) => switchInstanceVariant(selected.id, componentId)} onGoToMain={() => goToMain(selected)} onReset={() => edit((current) => resetOverrides(current, page.id, selected.id))} onDetach={() => edit((current) => detachInstance(current, page.id, selected.id))} props={propActions} />}
             path={<><PathSection node={selected} onOp={(op) => edit((current) => updateShape(current, page.id, selected.id, { boolOp: op, name: op[0]!.toUpperCase() + op.slice(1) }))} onFlatten={flattenSelection} onEditPath={() => startPathEdit(selected)} />{selected.mask ? <button className="wide-action" title="Ctrl+Alt+M" onClick={maskSelection}>◐ 마스크 해제</button> : null}</>}
             tokens={<TokenSection doc={doc} node={selected} onApply={(slot, tokenId) => edit((current) => applyToken(current, page.id, selected.id, slot, tokenId))} />}
             onPickImage={(index) => { imageTarget.current = { nodeId: selected.id, index }; imageRef.current?.click(); }}

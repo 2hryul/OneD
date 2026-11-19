@@ -24,7 +24,7 @@ export function ImportReportModal({ report, onClose, onDownload }: { report: Imp
         <header><strong>가져오기 보고서</strong><button aria-label="닫기" onClick={onClose}>×</button></header>
         <div className="report-body">
           <p>{report.imported}개 요소 · 인스턴스 {report.expandedInstances}개 펼침 · override {report.appliedOverrides}개 적용, {report.unappliedOverrides}개 미적용 · 도형 {report.approximatedShapes}개 근사 · 보고 항목 {report.issues.length}개</p>
-          <p>메인 컴포넌트 {report.components}개(Components 페이지) · 연결한 인스턴스 {report.linkedInstances}개 · 스타일에서 만든 색 토큰 {report.tokens}개</p>
+          <p>메인 컴포넌트 {report.components}개(Components 페이지) · 연결한 인스턴스 {report.linkedInstances}개 · 스타일·변수에서 만든 토큰 {report.tokens}개</p>
           {[...groups].map(([kind, items]) => (
             <div className="report-group" key={kind}>
               <h3>{KIND_LABEL[kind] ?? kind} ({items.length})</h3>
