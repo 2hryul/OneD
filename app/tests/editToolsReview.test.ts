@@ -48,14 +48,14 @@ describe('flip inside auto layout', () => {
 });
 
 describe('React export of transformed frames', () => {
-  const buttonStyle = (code: string): string => code.split('\n').find((line) => line.includes('"width":164'))!;
+  // CSS 파일에서 Button 사각형 규칙의 본문.
+  const buttonStyle = (css: string): string => /\.landing-page__button \{([^}]*)\}/.exec(css)![1]!;
 
   it('places children in the flipped frame so the frame flip is applied once', () => {
     const doc = sampleDocument();
     const flipped = applyChanges(doc, flipShapes(doc, PAGE, ['frame-1'], 'horizontal').redo);
-    const code = exportTsx(flipped, PAGE, 'frame-1').code;
-    const line = buttonStyle(code);
-    const left = Number(/"left":(-?[\d.]+)/.exec(line)![1]);
+    const line = buttonStyle(exportTsx(flipped, PAGE, 'frame-1').css);
+    const left = Number(/left: (-?[\d.]+)px/.exec(line)![1]);
     // 부모 div의 scaleX(-1)(가운데 기준)를 거친 뒤 보이는 위치가 편집기의 위치와 같아야 한다.
     expect(720 - left - 164).toBe(node(flipped, 'rect-2').x - node(flipped, 'frame-1').x);
     expect(line).not.toContain('scaleX(-1)');
@@ -64,10 +64,10 @@ describe('React export of transformed frames', () => {
   it('does not rotate children twice inside a rotated frame', () => {
     const doc = sampleDocument();
     const turned = applyChanges(doc, rotateShape(doc, PAGE, 'frame-1', 90).redo);
-    const code = exportTsx(turned, PAGE, 'frame-1').code;
-    expect(code).toContain('rotate(90deg)');
-    expect(buttonStyle(code)).toContain('"left":90,"top":297');
-    expect(buttonStyle(code)).not.toContain('rotate(');
+    const { css } = exportTsx(turned, PAGE, 'frame-1');
+    expect(css).toContain('rotate(90deg)');
+    expect(buttonStyle(css)).toContain('left: 90px;\n  top: 297px;');
+    expect(buttonStyle(css)).not.toContain('rotate(');
   });
 });
 

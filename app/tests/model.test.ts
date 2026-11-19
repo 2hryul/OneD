@@ -150,7 +150,8 @@ describe('React export', () => {
     expect(result.code).toContain('export function LandingPage');
     expect(result.code).toContain('heading0?: string');
     expect(result.code).toContain('props.heading0');
-    expect(result.code).toContain('"left":44');
+    expect(result.code).toContain("import './LandingPage.css';");
+    expect(result.css).toMatch(/\.landing-page__hero-panel \{[^}]*left: 44px;/);
     expect(() => transformSync(result.code, { loader: 'tsx', jsx: 'automatic' })).not.toThrow();
   });
 

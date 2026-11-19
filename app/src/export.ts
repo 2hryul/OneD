@@ -1,12 +1,15 @@
 import { variantName, walkPage, type Component, type DesignDocument, type DesignNode, type Page } from './model';
 import { applyPoint, center, invert, isFlipped, linearPart, multiply, rotationDegrees, worldMatrix } from './geometry';
-import { fontStack, pathPaint, paintsToBackground, strokeAndEffectCss, textCss } from './styleCss';
+import { fontStack, pathPaint, paintsToBackground, strokeAndEffectCss, textCss, withAlpha } from './styleCss';
 import { pathToD } from './path';
-
-type Style = Record<string, string | number>;
+import { cssText, kebab, tokenVars, uniqueIn, withTokens, type CssRule, type Style, type TokenVars } from './exportCss';
+import { boxElement, firstText, hasRole, inputElement, textElement, type Element } from './exportMarkup';
 
 const JUSTIFY_CSS = { start: 'flex-start', center: 'center', end: 'flex-end', 'space-between': 'space-between' } as const;
 const ALIGN_CSS = { start: 'flex-start', center: 'center', end: 'flex-end', stretch: 'stretch' } as const;
+
+/** 내보낸 결과. code는 TSX이고 첫 줄에서 cssFile(같은 폴더의 CSS 파일, 내용은 css)을 import한다. */
+export interface ExportResult { name: string; code: string; css: string; cssFile: string }
 
 function identifier(name: string): string {
   const parts = name.normalize('NFKD').replace(/[^a-zA-Z0-9]+/g, ' ').trim().split(/\s+/).filter(Boolean);
@@ -27,7 +30,7 @@ function placement(node: DesignNode, parent: DesignNode | null): Style {
   if (!parent) return { position: 'relative', width: node.width, height: node.height, boxSizing: 'border-box' };
   const inFlow = Boolean(parent.layout) && !node.item?.absolute;
   if (!inFlow) {
-    // 부모의 지역 좌표로 옮긴다. 부모 div가 자기 회전·반전을 CSS로 다시 적용하므로, 페이지 좌표 차이를 그대로 쓰면 두 번 적용된다.
+    // 부모의 지역 좌표로 옮긴다. 부모 요소가 자기 회전·반전을 CSS로 다시 적용하므로, 페이지 좌표 차이를 그대로 쓰면 두 번 적용된다.
     const local = applyPoint(invert(worldMatrix(parent)), center(node));
     return { position: 'absolute', left: round(local.x - node.width / 2), top: round(local.y - node.height / 2), width: node.width, height: node.height, boxSizing: 'border-box' };
   }
@@ -56,11 +59,22 @@ function layoutStyle(node: DesignNode): Style {
   };
 }
 
+/** 채우기. 단색 하나뿐이면 background-color로 쓰고(퍼블리셔가 고치기 쉬운 형태), 여러 겹·그라디언트·그림은 background 겹으로 쓴다. */
+function fillStyle(node: DesignNode): Style {
+  if (node.type !== 'frame' && node.type !== 'rectangle' && node.type !== 'ellipse') return {};
+  const [bottom, ...rest] = node.fills;
+  if (bottom?.type === 'solid') {
+    const color = withAlpha(bottom.color, bottom.opacity ?? 1);
+    // 위 겹이 그라디언트뿐이면 background-image로 따로 쓴다. 그림 겹은 위치·크기까지 담은 background 줄임 속성이 필요하다.
+    if (rest.length === 0) return { backgroundColor: color };
+    if (rest.every((paint) => paint.type !== 'image')) return { backgroundColor: color, backgroundImage: paintsToBackground(rest, node.width, node.height, () => null)! };
+  }
+  const background = paintsToBackground(node.fills, node.width, node.height, (assetId) => `./assets/${assetId}`);
+  return background ? { background } : {};
+}
+
 function styleFor(node: DesignNode, parent: DesignNode | null): Style {
-  const style: Style = { ...placement(node, parent), ...layoutStyle(node) };
-  const paintable = node.type === 'frame' || node.type === 'rectangle' || node.type === 'ellipse';
-  const background = paintable ? paintsToBackground(node.fills, node.width, node.height, (assetId) => `./assets/${assetId}`) : undefined;
-  if (background) style.background = background;
+  const style: Style = { ...placement(node, parent), ...layoutStyle(node), ...fillStyle(node) };
   Object.assign(style, strokeAndEffectCss(node));
   if (node.opacity !== undefined) style.opacity = node.opacity;
   if (node.type === 'ellipse') style.borderRadius = '50%';
@@ -75,7 +89,8 @@ function styleFor(node: DesignNode, parent: DesignNode | null): Style {
     Object.assign(style, textCss(node), { display: 'flex', flexDirection: 'column', whiteSpace: 'pre-wrap' });
     style.fontSize = node.fontSize ?? 18;
     if (node.fontFamily) style.fontFamily = fontStack(node.fontFamily);
-    if (node.fontWeight) style.fontWeight = node.fontWeight;
+    // 제목 요소의 기본 굵기(bold)를 이기도록 보통 굵기도 적는다.
+    style.fontWeight = node.fontWeight ?? 400;
   }
   return style;
 }
@@ -90,7 +105,8 @@ interface ComponentPlan {
   code: string[];
 }
 
-interface ExportState { doc: DesignDocument; plans: Map<string, ComponentPlan>; names: Set<string> }
+/** 파일 하나를 만드는 동안의 상태. rules는 CSS 규칙을 쓸 순서대로 모은다(컴포넌트 규칙이 그것을 쓰는 쪽보다 앞). */
+interface ExportState { doc: DesignDocument; plans: Map<string, ComponentPlan>; names: Set<string>; classes: Set<string>; rules: CssRule[]; vars: TokenVars }
 
 interface RenderContext {
   state: ExportState;
@@ -100,6 +116,14 @@ interface RenderContext {
   textProp: (node: DesignNode) => string | undefined;
   /** 렌더를 시작한 루트 도형. 루트 안의 인스턴스만 컴포넌트 사용으로 바꾼다. */
   rootId: string;
+  /** BEM 블록 이름(루트 클래스). 하위 요소는 `블록__요소`가 된다. */
+  block: string;
+  /** 이 렌더에서 만든 CSS 규칙. 렌더가 끝나면 state.rules 뒤에 붙인다. */
+  rules: CssRule[];
+  /** 입력창으로 바꿀 텍스트 id → 비밀번호 여부. input 이름 컨테이너를 만날 때 채운다. */
+  inputs: Map<string, boolean>;
+  /** 루트의 역할을 고를 때 함께 볼 이름. variant 메인의 레이어 이름은 'Size=L, Status=Default'처럼 속성뿐이라 세트 이름(예: Button)을 쓴다. */
+  rootRoleName?: string;
 }
 
 function hiddenIn(page: Page, rootId: string): Set<string> {
@@ -113,30 +137,60 @@ function uniqueName(state: ExportState, base: string): string {
   return name;
 }
 
+/** 도형에 맞는 HTML 요소. input 이름 컨테이너를 만나면 그 안의 첫 텍스트를 입력창으로 예약한다. */
+function elementOf(node: DesignNode, phrasing: boolean, context: RenderContext): Element {
+  if (node.type === 'text') return context.inputs.has(node.id) ? inputElement(context.inputs.get(node.id)!) : textElement(node, phrasing);
+  if (node.path || node.type === 'vector') return { tag: 'svg', attrs: [], reset: {}, phrasing: true };
+  if (node.id === context.rootId && context.rootRoleName) node = { ...node, name: `${context.rootRoleName} ${node.name}` };
+  const text = !phrasing && hasRole(node, 'input') ? firstText(context.page, node, context.hidden) : undefined;
+  const element = boxElement(node, phrasing, Boolean(text));
+  if (element.tag === 'label' && text) context.inputs.set(text.id, hasRole(node, 'password'));
+  return element;
+}
+
+/** 도형의 CSS 규칙을 만든다. 요소 초기화 스타일 위에 도형 스타일을 덮고, 토큰 값은 변수로 바꾼다. */
+function addRule(context: RenderContext, className: string, node: DesignNode, parent: DesignNode | null, element: Element): void {
+  const style: Style = { ...element.reset, ...styleFor(node, parent) };
+  if (element.tag === 'img') delete style.background;
+  const final = withTokens(style, node, context.state.vars);
+  context.rules.push({ selector: `.${className}`, style: final });
+  if (element.tag === 'input' && final.color !== undefined) context.rules.push({ selector: `.${className}::placeholder`, style: { color: final.color, opacity: 1 } });
+}
+
+function classAttr(className: string, root: boolean): string {
+  return root ? `className={[${JSON.stringify(className)}, props.className].filter(Boolean).join(' ')} style={props.style}` : `className="${className}"`;
+}
+
 /** 도형 하나를 JSX 줄로. 다른 컴포넌트의 인스턴스는 그 컴포넌트를 쓰는 한 줄이 된다. */
-function renderNode(node: DesignNode, parent: DesignNode | null, depth: number, context: RenderContext): string[] {
+function renderNode(node: DesignNode, parent: DesignNode | null, depth: number, context: RenderContext, phrasing = false): string[] {
   const indent = '  '.repeat(depth);
-  if (node.componentId && !node.mainInstance && node.id !== context.rootId) return [`${indent}${usage(context.state, context.page, node, parent)}`];
-  const style = JSON.stringify(styleFor(node, parent));
-  const styleAttr = parent ? `style={${style}}` : `className={props.className} style={{ ...${style}, ...props.style }}`;
+  const root = node.id === context.rootId;
+  if (node.componentId && !node.mainInstance && !root) return [`${indent}${usage(context, node, parent)}`];
+  const element = elementOf(node, phrasing, context);
+  const className = root ? context.block : uniqueIn(context.state.classes, `${context.block}__${kebab(node.name)}`);
+  addRule(context, className, node, parent, element);
+  const open = [element.tag, classAttr(className, root), ...element.attrs].join(' ');
   if (node.type === 'text') {
     const prop = context.textProp(node);
-    return [`${indent}<div ${styleAttr}>{${prop ? `props.${prop} ?? ` : ''}${JSON.stringify(node.text ?? '')}}</div>`];
+    const content = `${prop ? `props.${prop} ?? ` : ''}${JSON.stringify(node.text ?? '')}`;
+    return [element.tag === 'input' ? `${indent}<${open} placeholder={${content}} />` : `${indent}<${open}>{${content}}</${element.tag}>`];
   }
-  // 편집 경로가 있는 벡터와 불리언 그룹은 결과 경로 하나로 내보낸다(불리언 피연산자는 내보내지 않는다).
+  if (node.path || node.type === 'vector') return [`${indent}<${open} ${vectorBody(node)}</svg>`];
+  const children = element.tag === 'img' ? [] : (node.children ?? []).map((id) => context.page.objects[id]).filter((child): child is DesignNode => Boolean(child && !context.hidden.has(child.id)));
+  if (children.length === 0) return [`${indent}<${open} />`];
+  return [`${indent}<${open}>`, ...children.flatMap((child) => renderNode(child, node, depth + 1, context, phrasing || element.phrasing)), `${indent}</${element.tag}>`];
+}
+
+/** svg 여는 태그의 나머지 속성과 경로들. 편집 경로·불리언은 결과 경로 하나로, 가져온 벡터는 경로 목록으로 낸다. */
+function vectorBody(node: DesignNode): string {
   if (node.path) {
     const paint = pathPaint(node);
     const attrs = `fill=${JSON.stringify(paint.fill)}${paint.fillRule ? ` fillRule="${paint.fillRule}"` : ''}${paint.stroke ? ` stroke=${JSON.stringify(paint.stroke)} strokeWidth={${paint.strokeWidth}}` : ''}`;
-    return [`${indent}<svg ${styleAttr} viewBox="0 0 ${round(node.width)} ${round(node.height)}" overflow="visible" aria-hidden="true"><path d=${JSON.stringify(pathToD(node.path))} ${attrs} /></svg>`];
+    return `viewBox="0 0 ${round(node.width)} ${round(node.height)}" overflow="visible" aria-hidden="true"><path d=${JSON.stringify(pathToD(node.path))} ${attrs} />`;
   }
-  if (node.type === 'vector') {
-    const paths = (node.vectorPaths ?? []).map((path) => `<path d=${JSON.stringify(path.d)} fill=${JSON.stringify(path.fill)}${path.fillRule ? ` fillRule="${path.fillRule}"` : ''}${path.stroke ? ` stroke=${JSON.stringify(path.stroke)} strokeWidth={${path.strokeWidth ?? 1}}` : ''} />`).join('');
-    const view = node.viewBox ?? { width: node.width, height: node.height };
-    return [`${indent}<svg ${styleAttr} viewBox="0 0 ${view.width} ${view.height}" preserveAspectRatio="none" aria-hidden="true">${paths}</svg>`];
-  }
-  const children = (node.children ?? []).map((id) => context.page.objects[id]).filter((child): child is DesignNode => Boolean(child && !context.hidden.has(child.id)));
-  if (children.length === 0) return [`${indent}<div ${styleAttr} />`];
-  return [`${indent}<div ${styleAttr}>`, ...children.flatMap((child) => renderNode(child, node, depth + 1, context)), `${indent}</div>`];
+  const paths = (node.vectorPaths ?? []).map((path) => `<path d=${JSON.stringify(path.d)} fill=${JSON.stringify(path.fill)}${path.fillRule ? ` fillRule="${path.fillRule}"` : ''}${path.stroke ? ` stroke=${JSON.stringify(path.stroke)} strokeWidth={${path.strokeWidth ?? 1}}` : ''} />`).join('');
+  const view = node.viewBox ?? { width: node.width, height: node.height };
+  return `viewBox="0 0 ${view.width} ${view.height}" preserveAspectRatio="none" aria-hidden="true">${paths}`;
 }
 
 const BOOLEAN_VALUES = new Set(['true', 'false']);
@@ -189,6 +243,14 @@ function insideNestedInstance(page: Page, node: DesignNode, rootId: string): boo
   return false;
 }
 
+/** 루트 하나를 렌더하고, 만든 CSS 규칙을 파일 규칙 뒤에 붙인다. 안에서 처음 쓰인 컴포넌트의 규칙은 이미 앞에 붙어 있다. */
+function renderRoot(state: ExportState, page: Page, root: DesignNode, blockName: string, textProp: RenderContext['textProp'], rootRoleName?: string): string[] {
+  const context: RenderContext = { state, page, hidden: hiddenIn(page, root.id), rootId: root.id, textProp, block: uniqueIn(state.classes, kebab(blockName)), rules: [], inputs: new Map(), rootRoleName };
+  const body = renderNode(root, null, 2, context);
+  state.rules.push(...context.rules);
+  return body;
+}
+
 function componentCode(state: ExportState, plan: ComponentPlan): string[] {
   const props = [
     '  className?: string;',
@@ -211,19 +273,21 @@ function componentCode(state: ExportState, plan: ComponentPlan): string[] {
   for (const { member, fn } of renderers) {
     const main = mainOf(state.doc, member);
     if (!main) continue;
-    const context: RenderContext = { state, page: main.page, hidden: hiddenIn(main.page, main.node.id), rootId: main.node.id, textProp: (node) => (insideNestedInstance(main.page, node, main.node.id) ? undefined : plan.textProps.get(node.name)) };
-    const body = renderNode(main.node, null, 2, context);
+    const body = renderRoot(state, main.page, main.node, fn, (node) => (insideNestedInstance(main.page, node, main.node.id) ? undefined : plan.textProps.get(node.name)), member.name);
     lines.push(`${plan.members.length > 1 ? '' : 'export '}function ${fn}(props: ${plan.name}Props) {`, '  return (', ...body, '  );', '}', '');
   }
   return lines;
 }
 
-/** 인스턴스를 컴포넌트 사용 한 줄로. variant 값과, 메인과 다른 텍스트만 props로 넘긴다. 위치는 style prop으로 준다. */
-function usage(state: ExportState, page: Page, node: DesignNode, parent: DesignNode | null): string {
+/** 인스턴스를 컴포넌트 사용 한 줄로. variant 값과, 메인과 다른 텍스트만 props로 넘긴다. 위치는 부모 쪽 클래스로 준다. */
+function usage(context: RenderContext, node: DesignNode, parent: DesignNode | null): string {
+  const { state, page } = context;
   const component = node.componentId ? state.doc.components[node.componentId] : undefined;
   const plan = node.componentId ? ensurePlan(state, node.componentId) : null;
   if (!component || !plan) return `{/* 컴포넌트 ${node.componentId ?? ''} 없음 */}`;
-  const attrs = [`style={${JSON.stringify(placement(node, parent))}}`];
+  const className = uniqueIn(state.classes, `${context.block}__${kebab(node.name)}`);
+  context.rules.push({ selector: `.${className}`, style: placement(node, parent) });
+  const attrs = [`className="${className}"`];
   for (const item of plan.variantProps) {
     const value = component.variant?.[item.key];
     if (value !== undefined) attrs.push(item.boolean ? `${item.prop}={${value.toLowerCase() === 'true'}}` : `${item.prop}=${JSON.stringify(value)}`);
@@ -243,28 +307,29 @@ function findMainShape(doc: DesignDocument, id: string): DesignNode | undefined 
 }
 
 /**
- * 선택한 도형과 하위 트리를 React/TypeScript 코드로 만든다.
+ * 선택한 도형과 하위 트리를 React/TypeScript 코드와 CSS 파일로 만든다.
  * 오토 레이아웃 프레임은 CSS flex로, 나머지는 부모 기준 절대 좌표로 나온다. 숨긴 도형은 빠진다.
+ * 스타일은 BEM 클래스로 CSS 파일에 모이고, 태그는 레이어 이름으로 고르며(button, h1, input 등), 토큰은 CSS 변수가 된다.
  * 안에 든 인스턴스는 그 컴포넌트를 쓰는 JSX가 되고, 쓰인 컴포넌트는 같은 파일에 함수로 함께 나온다(S5-06).
  * 선택한 것이 메인 컴포넌트나 그 인스턴스면 그 컴포넌트 자체를 내보낸다.
  */
-export function exportTsx(doc: DesignDocument, pageId: string, selectedId: string): { name: string; code: string } {
+export function exportTsx(doc: DesignDocument, pageId: string, selectedId: string): ExportResult {
   const page = doc.pages.find((item) => item.id === pageId);
   const root = page?.objects[selectedId];
   if (!page || !root) throw new Error('Select a node to export');
-  const state: ExportState = { doc, plans: new Map(), names: new Set() };
+  const state: ExportState = { doc, plans: new Map(), names: new Set(), classes: new Set(), rules: [], vars: tokenVars(doc) };
   const componentId = root.componentId ?? (root.componentSet ? Object.values(doc.components).find((item) => item.setId === root.id)?.id : undefined);
   if (componentId && (root.mainInstance || root.componentSet)) {
     const plan = ensurePlan(state, componentId);
-    if (plan) return { name: plan.name, code: fileCode(state) };
+    if (plan) return result(state, plan.name);
   }
   const name = uniqueName(state, identifier(root.name));
   const hidden = hiddenIn(page, selectedId);
   const texts = walkPage(page, [selectedId]).filter((node) => node.type === 'text' && !hidden.has(node.id) && !(node.id !== selectedId && insideInstanceBelow(page, node, selectedId)));
   const props = new Map(texts.map((node, index) => [node.id, propertyName(node, index)]));
-  const body = renderNode(root, null, 2, { state, page, hidden, rootId: selectedId, textProp: (node) => props.get(node.id) });
+  const body = renderRoot(state, page, root, name, (node) => props.get(node.id));
   const own = [`export interface ${name}Props {`, '  className?: string;', '  style?: CSSProperties;', ...texts.map((node) => `  ${props.get(node.id)}?: string;`), '}', '', `export function ${name}(props: ${name}Props) {`, '  return (', ...body, '  );', '}', ''];
-  return { name, code: fileCode(state, own) };
+  return result(state, name, own);
 }
 
 function insideInstanceBelow(page: Page, node: DesignNode, rootId: string): boolean {
@@ -272,8 +337,10 @@ function insideInstanceBelow(page: Page, node: DesignNode, rootId: string): bool
   return false;
 }
 
-function fileCode(state: ExportState, own: string[] = []): string {
-  return ["import type { CSSProperties } from 'react';", '', ...own, ...[...state.plans.values()].flatMap((plan) => plan.code)].join('\n');
+function result(state: ExportState, name: string, own: string[] = []): ExportResult {
+  const cssFile = `${name}.css`;
+  const code = ["import type { CSSProperties } from 'react';", `import './${cssFile}';`, '', ...own, ...[...state.plans.values()].flatMap((plan) => plan.code)].join('\n');
+  return { name, code, css: cssText(state.rules, state.vars), cssFile };
 }
 
 function round(value: number): number {

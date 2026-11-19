@@ -45,8 +45,8 @@ describe('flip', () => {
     const turned = apply(flipped, rotateShape(flipped, PAGE, 'rect-2', 30));
     expect(rotationDegrees(node(turned, 'rect-2').transform)).toBe(30);
     expect(isFlipped(node(turned, 'rect-2').transform)).toBe(true);
-    expect(exportTsx(turned, PAGE, 'frame-1').code).toContain('rotate(30deg) scaleX(-1)');
-    expect(exportTsx(flipped, PAGE, 'frame-1').code).toContain('"transform":"scaleX(-1)"');
+    expect(exportTsx(turned, PAGE, 'frame-1').css).toContain('transform: rotate(30deg) scaleX(-1);');
+    expect(exportTsx(flipped, PAGE, 'frame-1').css).toContain('transform: scaleX(-1);');
   });
 });
 

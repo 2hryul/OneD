@@ -123,11 +123,11 @@ describe('layout in the document', () => {
   it('exports auto layout as CSS flex with nested children', () => {
     const base = sampleDocument();
     const laid = applyChanges(base, normalizeAfterEdit(base, updateShape(base, PAGE, 'frame-1', { layout: flex({ direction: 'column', justify: 'center' }) })).redo);
-    const code = exportTsx(laid, PAGE, 'frame-1').code;
-    expect(code).toContain('"display":"flex"');
-    expect(code).toContain('"flexDirection":"column"');
-    expect(code).toContain('"justifyContent":"center"');
-    expect(code).not.toContain('"left":44');
+    const { code, css } = exportTsx(laid, PAGE, 'frame-1');
+    expect(css).toContain('display: flex;');
+    expect(css).toContain('flex-direction: column;');
+    expect(css).toContain('justify-content: center;');
+    expect(css).not.toContain('left: 44px');
     expect(() => transformSync(code, { loader: 'tsx', jsx: 'automatic' })).not.toThrow();
   });
 });

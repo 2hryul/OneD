@@ -165,6 +165,8 @@ describe('component export', () => {
     expect(code).toContain('disabled?: boolean;');
     expect(code).toContain('label?: string;');
     expect(code).toContain('export function Button(props: ButtonProps)');
+    // variant 메인의 레이어 이름은 속성뿐이어도 세트 이름(Button)으로 button 요소가 된다.
+    expect(code.match(/<button className=\{\["button-/g)?.length).toBe(doc.pages[0]!.objects['button-set']!.children!.length);
     expect(() => transformSync(code, { loader: 'tsx', jsx: 'automatic' })).not.toThrow();
   });
 
@@ -172,7 +174,7 @@ describe('component export', () => {
     const { transformSync } = await import('esbuild');
     const doc = buttonScreen();
     const { code } = (await import('../src/export')).exportTsx(doc, PAGE, 'frame-1');
-    expect(code).toMatch(/<Button style=\{\{[^}]+\}\} variant="Primary" disabled=\{true\} label="Save" \/>/);
+    expect(code).toMatch(/<Button className="[a-z0-9_-]+" variant="Primary" disabled=\{true\} label="Save" \/>/);
     expect(code).toContain('export interface ButtonProps');
     expect(code).not.toContain('"text":"Save"');
     expect(() => transformSync(code, { loader: 'tsx', jsx: 'automatic' })).not.toThrow();

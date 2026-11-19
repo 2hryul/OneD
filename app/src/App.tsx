@@ -180,6 +180,7 @@ export function App(): JSX.Element {
   const lastHover = useRef<{ element: HTMLElement; point: Point } | null>(null);
   const [marquee, setMarquee] = useState<Rect | null>(null);
   const [codeOpen, setCodeOpen] = useState(false);
+  const [codeTab, setCodeTab] = useState<'tsx' | 'css'>('tsx');
   const [pendingFig, setPendingFig] = useState<File | null>(null);
   const [figInput, setFigInput] = useState('');
   const [importing, setImporting] = useState(false);
@@ -1144,7 +1145,9 @@ export function App(): JSX.Element {
 
       {importReport ? <ImportReportModal report={importReport} onClose={() => setImportReport(null)} onDownload={() => download('import-report.json', JSON.stringify(importReport, null, 2), 'application/json')} /> : null}
 
-      {codeOpen && exported ? <div className="modal-backdrop" onPointerDown={() => setCodeOpen(false)}><section className="code-modal" onPointerDown={(event) => event.stopPropagation()}><header><div><strong>{exported.name}.tsx</strong><span>선택한 요소의 React/TypeScript 초안</span></div><button aria-label="닫기" onClick={() => setCodeOpen(false)}>×</button></header><pre><code>{exported.code}</code></pre><footer><button onClick={() => void navigator.clipboard.writeText(exported.code).then(() => setNotice('코드를 복사했습니다.'))}>복사</button><button className="primary" onClick={() => download(`${exported.name}.tsx`, exported.code, 'text/plain')}>TSX 다운로드</button></footer></section></div> : null}
+      {codeOpen && exported ? <div className="modal-backdrop" onPointerDown={() => setCodeOpen(false)}><section className="code-modal" onPointerDown={(event) => event.stopPropagation()}><header><div><strong>{exported.name}.tsx · {exported.cssFile}</strong><span>선택한 요소의 React/TypeScript 초안과 CSS. 태그는 레이어 이름으로, 토큰은 CSS 변수로 나옵니다.</span></div><button aria-label="닫기" onClick={() => setCodeOpen(false)}>×</button></header>
+        <div className="code-tabs" role="tablist">{(['tsx', 'css'] as const).map((tab) => <button key={tab} role="tab" aria-selected={codeTab === tab} className={codeTab === tab ? 'active' : ''} onClick={() => setCodeTab(tab)}>{tab === 'tsx' ? `${exported.name}.tsx` : exported.cssFile}</button>)}</div>
+        <pre><code>{codeTab === 'tsx' ? exported.code : exported.css}</code></pre><footer><button onClick={() => void navigator.clipboard.writeText(codeTab === 'tsx' ? exported.code : exported.css).then(() => setNotice(`${codeTab === 'tsx' ? 'TSX' : 'CSS'}를 복사했습니다.`))}>{codeTab === 'tsx' ? 'TSX' : 'CSS'} 복사</button><button className="primary" onClick={() => { download(`${exported.name}.tsx`, exported.code, 'text/plain'); download(exported.cssFile, exported.css, 'text/css'); }}>TSX·CSS 다운로드</button></footer></section></div> : null}
     </div>
   );
 }
