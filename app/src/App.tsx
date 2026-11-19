@@ -41,6 +41,8 @@ import { Viewer } from './viewer';
 import { useCollab } from './useCollab';
 import { CommentPins, CommentsPanel, PresenceBar, RemoteCursors, ShareModal } from './collabPanels';
 import type { CommentThread } from './collabTypes';
+import { InspectPanel } from './inspectPanel';
+import { createZip, type ZipEntry } from './zip';
 
 type Tool = 'select' | 'hand' | 'frame' | 'rectangle' | 'ellipse' | 'text' | 'pen' | 'comment';
 type DrawTool = Exclude<Tool, 'select' | 'hand' | 'pen' | 'comment'>;
@@ -89,6 +91,9 @@ function useStable<A extends unknown[], R>(fn: (...args: A) => R): (...args: A) 
   ref.current = fn;
   return useCallback((...args: A) => ref.current(...args), []);
 }
+
+/** 그림 MIME → 파일 확장자. 내보낸 코드의 import 경로와 zip 안의 파일 이름이 같아야 한다. */
+const IMAGE_EXT: Record<string, string> = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp', 'image/svg+xml': 'svg' };
 
 function downloadBlob(name: string, blob: Blob): void {
   const url = URL.createObjectURL(blob);
@@ -205,7 +210,8 @@ export function App(): JSX.Element {
   });
   const [commentDraft, setCommentDraft] = useState<{ x: number; y: number } | null>(null);
   const [activeComment, setActiveComment] = useState<string | null>(null);
-  const [rightTab, setRightTab] = useState<'design' | 'prototype'>('design');
+  const [rightTab, setRightTab] = useState<'design' | 'prototype' | 'code'>('design');
+  const [codeAssets, setCodeAssets] = useState<Map<string, AssetRecord>>(new Map());
   const [viewerStart, setViewerStart] = useState<string | null>(null);
 
   const page = pageOf(doc, pageId);
@@ -213,7 +219,36 @@ export function App(): JSX.Element {
   const resolveAsset = useCallback((assetId: string) => assetUrls[assetId] ?? null, [assetUrls]);
   const liveSelection = selectedIds.filter((id) => page.objects[id]);
   const selected = liveSelection.length === 1 ? page.objects[liveSelection[0]!]! : null;
-  const exported = codeOpen && selected ? exportTsx(doc, page.id, selected.id) : null;
+  const assetFile = useCallback((assetId: string) => {
+    const mime = codeAssets.get(assetId)?.mime;
+    return mime && IMAGE_EXT[mime] ? `${assetId}.${IMAGE_EXT[mime]}` : assetId;
+  }, [codeAssets]);
+  const exported = codeOpen && selected ? exportTsx(doc, page.id, selected.id, { assetFile }) : null;
+  const exportedAssets = exported?.assets.join(',') ?? '';
+
+  // 코드 창이 열리면 코드가 쓰는 그림의 형식(MIME)을 읽어 둔다. import 경로에 확장자를 붙이고 zip에 같은 이름으로 넣기 위해서다.
+  useEffect(() => {
+    if (!exportedAssets) return;
+    let cancelled = false;
+    getAssets(exportedAssets.split(','))
+      .then((records) => { if (!cancelled) setCodeAssets(new Map(records.map((record) => [record.id, record]))); })
+      .catch((error: unknown) => setNotice(error instanceof Error ? error.message : '[codeAssets] 그림 읽기 실패'));
+    return () => { cancelled = true; };
+  }, [exportedAssets]);
+
+  /** TSX·CSS·그림을 zip 하나로. 저장소에 없는 그림은 빼고 알린다. */
+  const downloadCodeZip = (): void => {
+    if (!exported) return;
+    const files: ZipEntry[] = [{ path: `${exported.name}.tsx`, data: exported.code }, { path: exported.cssFile, data: exported.css }];
+    const missing = exported.assets.filter((id) => !codeAssets.has(id));
+    for (const id of exported.assets) { const record = codeAssets.get(id); if (record) files.push({ path: `assets/${assetFile(id)}`, data: record.bytes }); }
+    try {
+      downloadBlob(`${exported.name}.zip`, new Blob([createZip(files)], { type: 'application/zip' }));
+      setNotice(missing.length ? `zip을 받았습니다. 그림 ${missing.length}개는 저장소에 없어 빠졌습니다.` : `zip을 받았습니다(파일 ${files.length}개).`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '[downloadCodeZip] zip 만들기 실패');
+    }
+  };
 
 /** 영역(페이지 좌표)이 화면 가운데에 다 보이게 확대·이동한다. maxZoom보다 크게는 확대하지 않는다. */
   const zoomToRect = useCallback((box: Rect, maxZoom: number): void => {
@@ -1111,9 +1146,13 @@ export function App(): JSX.Element {
           <div className="panel-heading panel-tabs">
             <button className={rightTab === 'design' ? 'active' : ''} onClick={() => setRightTab('design')}>디자인</button>
             <button className={rightTab === 'prototype' ? 'active' : ''} onClick={() => setRightTab('prototype')}>프로토타입</button>
+            <button className={rightTab === 'code' ? 'active' : ''} onClick={() => setRightTab('code')}>코드</button>
           </div>
           {rightTab === 'design' && liveSelection.length > 0 ? <AlignBar count={topLevelIds(page, liveSelection).length} onAlign={alignSelection} onDistribute={distributeSelection} onFlip={flipSelection} /> : null}
-          {rightTab === 'prototype' ? (selected
+          {rightTab === 'code' ? (selected
+            ? <InspectPanel key={selected.id} doc={doc} page={page} node={selected} onOpenCode={() => setCodeOpen(true)} onCopy={(text, label) => void navigator.clipboard.writeText(text).then(() => setNotice(`${label}를 복사했습니다.`)).catch(() => setNotice('[InspectPanel] 복사 실패 - 클립보드 권한 없음'))} />
+            : <div className="nothing-selected"><span>{'</>'}</span><strong>코드 검사</strong><p>요소를 선택하면 그 요소의 CSS를 px 또는 rem으로 보여 줍니다.</p></div>)
+          : rightTab === 'prototype' ? (selected
             ? <PrototypePanel key={selected.id} page={page} node={selected}
               onChange={(interactions) => edit((current) => updateShape(current, page.id, selected.id, { interactions: interactions.length ? interactions : undefined }), `${selected.id}:interactions`)}
               onFixedScroll={(fixed) => edit((current) => updateShape(current, page.id, selected.id, { fixedScroll: fixed || undefined }))}
@@ -1147,7 +1186,7 @@ export function App(): JSX.Element {
 
       {codeOpen && exported ? <div className="modal-backdrop" onPointerDown={() => setCodeOpen(false)}><section className="code-modal" onPointerDown={(event) => event.stopPropagation()}><header><div><strong>{exported.name}.tsx · {exported.cssFile}</strong><span>선택한 요소의 React/TypeScript 초안과 CSS. 태그는 레이어 이름으로, 토큰은 CSS 변수로 나옵니다.</span></div><button aria-label="닫기" onClick={() => setCodeOpen(false)}>×</button></header>
         <div className="code-tabs" role="tablist">{(['tsx', 'css'] as const).map((tab) => <button key={tab} role="tab" aria-selected={codeTab === tab} className={codeTab === tab ? 'active' : ''} onClick={() => setCodeTab(tab)}>{tab === 'tsx' ? `${exported.name}.tsx` : exported.cssFile}</button>)}</div>
-        <pre><code>{codeTab === 'tsx' ? exported.code : exported.css}</code></pre><footer><button onClick={() => void navigator.clipboard.writeText(codeTab === 'tsx' ? exported.code : exported.css).then(() => setNotice(`${codeTab === 'tsx' ? 'TSX' : 'CSS'}를 복사했습니다.`))}>{codeTab === 'tsx' ? 'TSX' : 'CSS'} 복사</button><button className="primary" onClick={() => { download(`${exported.name}.tsx`, exported.code, 'text/plain'); download(exported.cssFile, exported.css, 'text/css'); }}>TSX·CSS 다운로드</button></footer></section></div> : null}
+        <pre><code>{codeTab === 'tsx' ? exported.code : exported.css}</code></pre><footer><button onClick={() => void navigator.clipboard.writeText(codeTab === 'tsx' ? exported.code : exported.css).then(() => setNotice(`${codeTab === 'tsx' ? 'TSX' : 'CSS'}를 복사했습니다.`))}>{codeTab === 'tsx' ? 'TSX' : 'CSS'} 복사</button><button onClick={() => { download(`${exported.name}.tsx`, exported.code, 'text/plain'); download(exported.cssFile, exported.css, 'text/css'); }}>TSX·CSS 다운로드</button><button className="primary" onClick={downloadCodeZip}>zip 받기{exported.assets.length ? ` (그림 ${exported.assets.length}개 포함)` : ''}</button></footer></section></div> : null}
     </div>
   );
 }
