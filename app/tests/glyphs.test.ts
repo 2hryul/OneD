@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { encodeCommandsBlob, type FigDocument, type FigNode } from 'openfig-core';
-import { importFigNode } from '../src/figmaImport';
+import { importFigNode, listFigFrames } from '../src/figmaImport';
 import { figGlyphPath, glyphKey, glyphOutline } from '../src/glyphs';
 import { parseDocument, walkPage, type DesignNode } from '../src/model';
 
@@ -60,3 +60,19 @@ describe('glyph outlines for fonts this PC does not have', () => {
   });
 });
 
+describe('frame list for local .fig files', () => {
+  it('lists top-level frames and frames inside sections, skipping hidden library pages', () => {
+    const page = f(10, 'CANVAS', 'Examples', { size: undefined });
+    const hidden = f(11, 'CANVAS', 'Internal Only Canvas', { size: undefined, internalOnly: true });
+    const card = f(1, 'FRAME', 'First success', { size: { x: 320, y: 180 } });
+    const section = f(2, 'SECTION', 'Flows', { size: { x: 900, y: 900 } });
+    const inSection = f(3, 'FRAME', 'Login', { size: { x: 375, y: 812 } });
+    const loose = f(4, 'TEXT', 'Note');
+    const library = f(5, 'SYMBOL', 'Button');
+    const fig = figOf([page, hidden, card, section, inSection, loose, library], { '1:10': [card, section, loose], '1:2': [inSection], '1:11': [library] });
+    expect(listFigFrames(fig)).toEqual([
+      { id: '1:1', name: 'First success', page: 'Examples', width: 320, height: 180 },
+      { id: '1:3', name: 'Login', page: 'Examples', width: 375, height: 812 }
+    ]);
+  });
+});

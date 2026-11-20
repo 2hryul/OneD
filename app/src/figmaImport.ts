@@ -47,6 +47,30 @@ export function importFigFile(bytes: Uint8Array, rootId: string): FigImportResul
   return importFigNode(parseFig(bytes), rootId);
 }
 
+/** 가져오기 창에 보여 줄 프레임 하나. page는 그 프레임이 있는 페이지 이름이다. */
+export interface FigFrameEntry { id: string; name: string; page: string; width: number; height: number }
+
+const FRAME_TYPES = new Set(['FRAME', 'COMPONENT', 'SYMBOL', 'COMPONENT_SET', 'INSTANCE', 'GROUP']);
+
+/**
+ * 파일 안에서 가져올 수 있는 프레임 목록. 페이지의 최상위 프레임과 섹션 바로 아래 프레임이다.
+ * Figma 링크가 없는 로컬 파일은 node-id를 알 방법이 없어 이 목록에서 고르게 한다. 라이브러리용 숨은 페이지(internalOnly)는 뺀다.
+ */
+export function listFigFrames(fig: FigDocument): FigFrameEntry[] {
+  const entries: FigFrameEntry[] = [];
+  const idOf = (node: FigNode): string => `${node.guid?.sessionID}:${node.guid?.localID}`;
+  for (const page of fig.nodes.filter((node) => node.type === 'CANVAS' && !(node as { internalOnly?: boolean }).internalOnly)) {
+    const add = (node: FigNode): void => {
+      if (node.size && FRAME_TYPES.has(node.type as string)) entries.push({ id: idOf(node), name: node.name ?? idOf(node), page: page.name ?? '', width: Math.round(node.size.x), height: Math.round(node.size.y) });
+    };
+    for (const top of childrenOf(fig, idOf(page))) {
+      if (top.type === 'SECTION') childrenOf(fig, idOf(top)).forEach(add);
+      else add(top);
+    }
+  }
+  return entries;
+}
+
 /**
  * 자식 노드를 그리는 순서(parentIndex.position)대로. Figma의 순서 문자열은 문자 코드 순으로 비교해야 한다.
  * 파서(openfig-core)는 localeCompare로 정렬해 공백 등이 든 문자열(" ~")의 순서가 틀어지므로 여기서 다시 정렬한다.
