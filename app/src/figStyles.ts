@@ -1,4 +1,5 @@
 import { resolveGradientGeometry, type FigColor, type FigDocument, type FigNode, type FigPaint } from 'openfig-core';
+import { figGlyphPath, glyphKey } from './glyphs.ts';
 import { sniffImageMime, type AssetRecord } from './assets.ts';
 import type { Effect, GradientStop, ImageFit, Paint, Stroke, TextAlign, TextSpan, VerticalAlign } from './model.ts';
 
@@ -10,6 +11,8 @@ export interface StyleSink {
   fig: FigDocument;
   assets: Map<string, AssetRecord>;
   issues: ImportIssue[];
+  /** 글꼴을 쓸 수 있는지. 없으면 텍스트에 글리프 윤곽을 저장한다. 없으면 모두 있다고 본다. */
+  fontAvailable?: (family: string) => boolean;
 }
 
 type FigEffect = NonNullable<FigNode['effects']>[number];
@@ -156,8 +159,13 @@ export function figTextStyle(sink: StyleSink, node: FigNode, nodeId: string): Re
   const lineHeight = lineHeightPx(node.lineHeight as FigUnitValue | undefined, fontSize);
   const letterSpacing = letterSpacingPx(node.letterSpacing as FigUnitValue | undefined, fontSize);
   const spans = figSpans(sink, node, nodeId);
+  const base = { text: node.textData?.characters ?? '', fontSize, fontFamily: node.fontName?.family ?? 'Arial', fontWeight: fontWeight(node.fontName?.style) };
+  // 이 PC에 없는 글꼴은 Figma가 저장한 글리프 윤곽으로 그린다. 구간 스타일이 있는 텍스트는 윤곽과 구간을 맞출 수 없어 제외한다.
+  const missing = !spans.length && sink.fontAvailable && !sink.fontAvailable(base.fontFamily);
+  const glyphPath = missing ? figGlyphPath(sink.fig, node) : null;
   return {
-    text: node.textData?.characters ?? '', fontSize, fontFamily: node.fontName?.family ?? 'Arial', fontWeight: fontWeight(node.fontName?.style),
+    ...base,
+    ...(glyphPath ? { glyphs: { key: glyphKey(base), d: glyphPath } } : {}),
     ...(node.textAlignHorizontal && TEXT_ALIGN[node.textAlignHorizontal] !== 'left' ? { textAlign: TEXT_ALIGN[node.textAlignHorizontal] } : {}),
     ...(node.textAlignVertical && VERTICAL_ALIGN[node.textAlignVertical as string] !== 'top' ? { verticalAlign: VERTICAL_ALIGN[node.textAlignVertical as string] } : {}),
     ...(lineHeight !== undefined ? { lineHeight } : {}),

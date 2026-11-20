@@ -6,6 +6,7 @@ import type { Measure } from './measure';
 import { fontStack, pathPaint, paintsToBackground, strokeAndEffectCss, textCss, textRuns, type AssetResolver } from './styleCss';
 import { pathToD } from './path';
 import { hasMask, maskImageUrl, maskRuns } from './mask';
+import { glyphOutline } from './glyphs';
 
 const HANDLE_CURSOR: Record<Handle, string> = { n: 'ns-resize', s: 'ns-resize', e: 'ew-resize', w: 'ew-resize', ne: 'nesw-resize', sw: 'nesw-resize', nw: 'nwse-resize', se: 'nwse-resize' };
 
@@ -136,6 +137,11 @@ function nodeStyle(node: DesignNode, local: Matrix, locked: boolean, resolveAsse
 
 /** 스타일 구간별로 글자를 나눠 그린다. 세로 정렬을 위해 한 덩어리로 감싼다. */
 function TextContent({ node }: { node: DesignNode }): JSX.Element {
+  // 글꼴이 없으면 Figma가 저장한 글리프 윤곽을 글자 색으로 그린다(대체 글꼴은 글자 모양·폭이 달라진다).
+  const outline = glyphOutline(node);
+  if (outline) {
+    return <svg className="text-outline" width="100%" height="100%" viewBox={`0 0 ${node.width} ${node.height}`} overflow="visible" aria-label={node.text}><path d={outline} fill={textCss(node).color as string} /></svg>;
+  }
   return (
     <div className="text-content">
       {textRuns(node).map((run, index) => run.span

@@ -1,9 +1,10 @@
-import type { DesignNode, Page, Paint, Stroke } from './model';
+import { primaryColor, type DesignNode, type Page, type Paint, type Stroke } from './model';
 import { worldMatrix } from './geometry';
 import { pathToD } from './path';
 import { withAlpha } from './styleCss';
 import { exportBox, layoutText, placeLines } from './canvasRenderer';
 import { maskPaths, maskRuns, maskShapes } from './mask';
+import { glyphOutline } from './glyphs';
 
 interface SvgOptions {
   /** 이미지 채우기를 넣을 data URL. 없으면 회색 상자로 대신한다. */
@@ -162,6 +163,9 @@ function runsOf(pieces: ReadonlyArray<{ text: string; font: string; color: strin
 
 /** 글. 캔버스 렌더러와 같은 줄나눔·정렬로 조각마다 text 요소를 둔다(글꼴이 없는 곳에서도 위치가 같도록 x를 직접 준다). */
 function emitText(writer: SvgWriter, node: DesignNode): string {
+  // 글꼴이 없으면 글리프 윤곽 경로로 낸다. SVG를 여는 쪽에도 글꼴이 없을 가능성이 크고, 윤곽이면 어디서나 같은 모양이다.
+  const outline = glyphOutline(node);
+  if (outline) return `<g transform="${matrixOf(node)}"><path d="${escapeXml(outline)}" fill="${escapeXml(primaryColor(node, '#17223a'))}"/></g>`;
   const placed = placeLines(node, layoutText(writer.options.measure, node));
   const spacing = node.letterSpacing ? ` letter-spacing="${num(node.letterSpacing)}"` : '';
   // 한 줄에서 글꼴·색이 같은 조각(공백 포함)은 text 하나로 합친다. 줄 끝 공백은 뺀다.

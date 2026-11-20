@@ -90,6 +90,11 @@ export interface DesignNode {
   /** 레이아웃이 없는 프레임의 크기가 바뀔 때 이 자식이 따라가는 방식. 없으면 left·top. */
   constraints?: Constraints;
   vectorPaths?: Array<{ d: string; fill: string; stroke?: string; strokeWidth?: number; fillRule?: 'evenodd' }>;
+  /**
+   * text에만 있다. Figma 파일에 저장된 글리프 윤곽(글자 상자 지역 좌표의 SVG 경로)과, 그 윤곽이 맞는 글자·글꼴·크기·굵기(key).
+   * 글꼴이 이 PC에 없을 때 Figma와 같은 모양으로 그리는 데 쓰고, 글자가 바뀌어 key가 다르면 쓰지 않는다.
+   */
+  glyphs?: { key: string; d: string };
   /** vectorPaths 좌표계의 크기. 도형 크기가 바뀌어도 경로가 같이 늘어나도록 SVG viewBox로 쓴다. 없으면 도형 크기. */
   viewBox?: { width: number; height: number };
   /** 편집 경로의 채우기 규칙. 불리언 결과처럼 구멍이 있는 경로는 evenodd다. */
@@ -184,7 +189,7 @@ export const TOKEN_SLOT_TYPE: Record<TokenSlot, TokenType> = { fill: 'color', st
 export const SYNC_GROUPS = {
   name: ['name'],
   fill: ['fills'],
-  content: ['text', 'spans', 'vectorPaths', 'viewBox', 'fillRule', 'path', 'boolOp', 'mask', 'propRefs'],
+  content: ['text', 'spans', 'glyphs', 'vectorPaths', 'viewBox', 'fillRule', 'path', 'boolOp', 'mask', 'propRefs'],
   visibility: ['hidden'],
   modifiable: ['locked'],
   'text-font': ['fontSize', 'fontFamily', 'fontWeight'],
@@ -447,6 +452,7 @@ function checkNodeFields(node: unknown, version: 1 | 2 | 3 | 4 | 5): asserts nod
   if (!optional(node.hidden, isBoolean) || !optional(node.locked, isBoolean) || !optional(node.clipContent, isBoolean) || !optional(node.mask, isBoolean)) throw new Error('Invalid node');
   if (!optional(node.strokes, (value) => isArrayOf(value, isStroke)) || !optional(node.effects, (value) => isArrayOf(value, isEffect))) throw new Error('Invalid style');
   if (!optional(node.spans, (value) => isArrayOf(value, isSpan))) throw new Error('Invalid text');
+  if (!optional(node.glyphs, (value) => isRecord(value) && typeof value.key === 'string' && typeof value.d === 'string')) throw new Error('Invalid text');
   if (!optional(node.textAlign, (value) => ['left', 'center', 'right', 'justify'].includes(value as string)) ||
     !optional(node.verticalAlign, (value) => ['top', 'middle', 'bottom'].includes(value as string)) ||
     !optional(node.lineHeight, isFiniteNumber) || !optional(node.letterSpacing, isFiniteNumber)) throw new Error('Invalid text');

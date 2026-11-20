@@ -4,6 +4,7 @@ import { topInstanceRoot, touchedAgainstMain } from './components.ts';
 import { applyPoint, cleanMatrix, linearPart, multiply } from './geometry.ts';
 import type { AssetRecord } from './assets.ts';
 import { figColor, figEffects, figPaints, figStrokes, figTextStyle, type ImportIssue, type StyleSink } from './figStyles.ts';
+import { fontAvailable } from './glyphs.ts';
 import { vectorNetworkPaths } from './vectorNetwork.ts';
 import { figConstraints, figItem, figLayout } from './figLayout.ts';
 import { applyProps, collectProps, componentPropsOf, instanceValues, nodePropRefs, scopeOf, type FigPropAssignment, type PropScope, type PropValues } from './figProps.ts';
@@ -100,11 +101,11 @@ function placeBox(world: Matrix, width: number, height: number): { x: number; y:
  * 인스턴스는 참조 컴포넌트를 펼치고 overrideKey 경로가 맞는 override를 적용한다.
  * 위치는 부모부터 Figma 행렬을 곱해 누적하므로 회전된 부모 안의 자식도 제자리에 놓인다.
  */
-export function importFigNode(fig: FigDocument, rootId: string): FigImportResult {
+export function importFigNode(fig: FigDocument, rootId: string, options: FigImportOptions = {}): FigImportResult {
   const root = fig.nodeMap.get(rootId);
   if (!root) throw new Error(`Figma 노드 ${rootId}를 찾지 못했습니다.`);
   if (!root.size) throw new Error('크기가 없는 노드는 가져올 수 없습니다. 프레임을 선택하세요.');
-  const state = createState(fig);
+  const state = createState(fig, options);
   const rootWorld = linearPart(figMatrix(root));
   walk(state, { source: root, id: rootId, parentId: null, world: rootWorld, isRoot: true, symbolTrail: new Set(), overrides: [], modes: ancestorModes(fig, root) });
   finishOverrideReport(state);
@@ -235,13 +236,19 @@ interface WalkState {
   hiddenTargets: Set<string>;
 }
 
+/**
+ * 가져오기 선택 사항. fontAvailable은 글꼴을 쓸 수 있는지 판단한다(기본은 이 브라우저의 글꼴 확인).
+ * 쓸 수 없는 글꼴의 텍스트만 파일의 글리프 윤곽을 함께 저장한다(모든 텍스트에 저장하면 문서가 커진다).
+ */
+export interface FigImportOptions { fontAvailable?: (family: string) => boolean }
+
 /** scope: 이 노드를 가진 컴포넌트(세트)의 속성 범위. props: 바깥 인스턴스들이 정한 속성 값. */
 interface WalkInput { source: FigNode; id: string; parentId: string | null; world: Matrix; isRoot: boolean; symbolTrail: Set<string>; overrides: FigOverride[]; parentLayout?: Layout; props?: PropValues; scope?: PropScope; modes?: ModeMap }
 
-function createState(fig: FigDocument): WalkState {
+function createState(fig: FigDocument, options: FigImportOptions): WalkState {
   const report: ImportReport = { imported: 0, expandedInstances: 0, unresolvedInstances: 0, approximatedShapes: 0, appliedOverrides: 0, unappliedOverrides: 0, issues: [], components: 0, linkedInstances: 0, tokens: 0 };
   const styles = new Map(fig.nodes.filter((node) => node.styleType === 'FILL' && typeof node.key === 'string').map((node) => [node.key as string, node]));
-  return { fig, sink: { fig, assets: new Map(), issues: report.issues }, nodes: [], report, overrides: [], applied: new Set(), hiddenTargets: new Set(), instanceSymbols: new Map(), styles, tokens: new Map() };
+  return { fig, sink: { fig, assets: new Map(), issues: report.issues, fontAvailable: options.fontAvailable ?? fontAvailable }, nodes: [], report, overrides: [], applied: new Set(), hiddenTargets: new Set(), instanceSymbols: new Map(), styles, tokens: new Map() };
 }
 
 /**

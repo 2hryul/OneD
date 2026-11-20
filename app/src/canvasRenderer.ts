@@ -3,6 +3,7 @@ import { boundsOf, multiply, worldCorners, worldMatrix, type Rect } from './geom
 import { pathToD } from './path';
 import { maskShapes } from './mask';
 import { DEFAULT_FONT_STACK, fontStack, textRuns, withAlpha } from './styleCss';
+import { glyphOutline } from './glyphs';
 
 /** 화면 상태. pan은 화면 픽셀, zoom은 배율, dpr은 장치 픽셀 비율이다. */
 export interface View { panX: number; panY: number; zoom: number; width: number; height: number; dpr: number }
@@ -432,6 +433,15 @@ export function placeLines(node: DesignNode, lines: readonly TextLine[]): Array<
 /** 텍스트. 상자로 자르고, 세로 정렬과 가로 정렬을 DOM과 같게 한다. 화면에서 너무 작으면 막대로 대신한다. */
 function drawText(state: DrawState, node: DesignNode): void {
   const { ctx } = state;
+  const outline = typeof Path2D === 'undefined' ? null : glyphOutline(node);
+  if (outline) {
+    // 글꼴이 없으면 저장된 글리프 윤곽으로 그린다. 윤곽은 글자 상자 지역 좌표다.
+    ctx.save();
+    ctx.fillStyle = primaryColor(node, '#17223a');
+    ctx.fill(new Path2D(outline));
+    ctx.restore();
+    return;
+  }
   const greek = (node.fontSize ?? 18) * state.zoom < GREEK_PIXELS;
   ctx.save();
   ctx.beginPath(); ctx.rect(0, 0, node.width, node.height); ctx.clip();
