@@ -6,7 +6,7 @@ export type Style = Record<string, string | number>;
  * CSS 규칙 하나. keepOrder는 같은 요소에 다른 클래스 규칙이 함께 걸려 순서가 중요한 규칙이다
  * (컴포넌트 루트와 인스턴스 위치 클래스). 이런 규칙은 선언이 같아도 다른 규칙과 합치지 않는다.
  */
-export interface CssRule { selector: string; style: Style; keepOrder?: boolean; media?: string }
+export interface CssRule { selector: string; style: Style; keepOrder?: boolean; media?: string; /** 규칙을 만든 컴포넌트·화면 이름. 파일을 나눠 낼 때 어느 CSS 파일에 들어갈지 정한다. */ owner?: string }
 
 /** CSS에서 px를 붙이지 않는 속성. React 인라인 스타일과 같은 규칙이라 출력 모양이 바뀌지 않는다. */
 const UNITLESS = new Set(['opacity', 'fontWeight', 'flexGrow', 'flexShrink', 'zIndex', 'order', 'lineHeight']);
@@ -121,7 +121,8 @@ function fontNote(vars: TokenVars): string[] {
  * CSS 파일 내용. 글꼴 안내와 토큰 변수(:root)를 맨 앞에 두고, 규칙은 받은 순서대로 쓴다(뒤 규칙이 같은 우선순위에서 이긴다).
  * 선언이 똑같은 규칙은 처음 나온 자리에서 선택자 목록으로 합친다. 합치는 규칙은 한 요소에 하나뿐이라 자리를 옮겨도 결과가 같다.
  */
-export function cssText(rules: readonly CssRule[], vars: TokenVars): string {
+export function cssText(rules: readonly CssRule[], vars: TokenVars, options: { tokens?: boolean } = {}): string {
+  const withTokens = options.tokens ?? true;
   const blocks: Array<{ selectors: string[]; body: string }> = [];
   const shared = new Map<string, { selectors: string[]; body: string }>();
   const media = new Map<string, string[]>();
@@ -135,9 +136,14 @@ export function cssText(rules: readonly CssRule[], vars: TokenVars): string {
     blocks.push(block);
     if (!rule.keepOrder) shared.set(body, block);
   }
-  const root = vars.declarations.length ? [`:root {\n${vars.declarations.join('\n')}\n}`] : [];
+  const root = withTokens ? tokenCss(vars) : [];
   const queries = [...media].map(([query, list]) => `@media ${query} {\n${list.join('\n\n')}\n}`);
-  return `${[...fontNote(vars), ...root, ...blocks.map((block) => `${block.selectors.join(',\n')} {\n${block.body}\n}`), ...queries].join('\n\n')}\n`;
+  return `${[...root, ...blocks.map((block) => `${block.selectors.join(',\n')} {\n${block.body}\n}`), ...queries].join('\n\n')}\n`;
+}
+
+/** 글꼴 안내와 토큰 변수(:root) 블록. 파일을 나눠 낼 때는 tokens.css 하나에만 들어간다. */
+export function tokenCss(vars: TokenVars): string[] {
+  return [...fontNote(vars), ...(vars.declarations.length ? [`:root {\n${vars.declarations.join('\n')}\n}`] : [])];
 }
 
 /** px 값을 rem(16px 기준)으로 바꾼 CSS. 검사 창의 단위 전환에 쓴다. */

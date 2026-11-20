@@ -73,9 +73,10 @@ describe('mask in React export', () => {
     let doc = scene();
     doc = applyChanges(doc, updateShape(doc, PAGE, 'circle', { mask: true }).redo);
     const { code, css } = exportTsx(doc, PAGE, 'frame');
-    expect(code).not.toContain('frame__circle');
-    expect(css).toMatch(/\.frame \{[^}]*mask-image: url\("data:image\/svg\+xml,%3Csvg[^"]*"\);\n {2}-webkit-mask-image: url\(/);
-    expect(css).toMatch(/\.frame \{[^}]*mask-size: 100% 100%;/);
+    // 루트 이름이 기본 이름(Frame)이라 화면 이름은 Screen이다.
+    expect(code).not.toContain('screen__circle');
+    expect(css).toMatch(/\.screen \{[^}]*mask-image: url\("data:image\/svg\+xml,%3Csvg[^"]*"\);\n {2}-webkit-mask-image: url\(/);
+    expect(css).toMatch(/\.screen \{[^}]*mask-size: 100% 100%;/);
     transformSync(code, { loader: 'tsx', jsx: 'automatic' });
   });
 
@@ -83,8 +84,8 @@ describe('mask in React export', () => {
     let doc = scene();
     doc = applyChanges(doc, updateShape(doc, PAGE, 'red', { mask: true }).redo);
     const { code, css } = exportTsx(doc, PAGE, 'frame');
-    expect(code).toMatch(/<div className="frame__circle" \/>\s*<div className="frame__red-mask">\s*<div className="frame__blue" \/>\s*<\/div>/);
-    expect(css).toMatch(/\.frame__red-mask \{\n {2}display: block;\n {2}position: absolute;\n {2}left: 0;\n {2}top: 0;\n {2}width: 100%;\n {2}height: 100%;\n {2}mask-image:/);
+    expect(code).toMatch(/<div className="screen__circle" \/>\s*<div className="screen__mask">\s*<div className="screen__blue" \/>\s*<\/div>/);
+    expect(css).toMatch(/\.screen__mask \{\n {2}display: block;\n {2}position: absolute;\n {2}left: 0;\n {2}top: 0;\n {2}width: 100%;\n {2}height: 100%;\n {2}mask-image:/);
     transformSync(code, { loader: 'tsx', jsx: 'automatic' });
   });
 });

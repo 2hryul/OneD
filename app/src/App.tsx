@@ -237,10 +237,10 @@ export function App(): JSX.Element {
     return () => { cancelled = true; };
   }, [exportedAssets]);
 
-  /** TSX·CSS·그림을 zip 하나로. 저장소에 없는 그림은 빼고 알린다. */
+  /** 프로젝트에 넣을 형태로 나눈 파일(화면, components/, tokens.css)과 그림을 zip 하나로. 저장소에 없는 그림은 빼고 알린다. */
   const downloadCodeZip = (): void => {
     if (!exported) return;
-    const files: ZipEntry[] = [{ path: `${exported.name}.tsx`, data: exported.code }, { path: exported.cssFile, data: exported.css }];
+    const files: ZipEntry[] = exported.files.map((file) => ({ path: file.path, data: file.data }));
     const missing = exported.assets.filter((id) => !codeAssets.has(id));
     for (const id of exported.assets) { const record = codeAssets.get(id); if (record) files.push({ path: `assets/${assetFile(id)}`, data: record.bytes }); }
     try {

@@ -4,17 +4,21 @@ import { hasMask, maskImageUrl, maskRuns } from './mask';
 import { applyPoint, center, invert, isFlipped, linearPart, multiply, rotationDegrees, worldMatrix } from './geometry';
 import { fontStack, pathPaint, paintsToBackground, strokeAndEffectCss, textCss, textRuns, withAlpha } from './styleCss';
 import { pathToD } from './path';
-import { cssText, declarations, kebab, tokenVars, typographyVar, uniqueIn, withTokens, type CssRule, type Style, type TokenVars } from './exportCss';
-import { boxElement, controlState, fieldControl, fieldKind, firstText, hasRole, inputElement, isIcon, selectBox, textElement, VISUALLY_HIDDEN, type ControlState, type Element, type FieldKind } from './exportMarkup';
+import { cssText, declarations, kebab, tokenCss, tokenVars, typographyVar, uniqueIn, withTokens, type CssRule, type Style, type TokenVars } from './exportCss';
+import { boxElement, cleanName, controlState, fieldControl, fieldKind, firstText, hasRole, inputElement, isIcon, selectBox, textElement, VISUALLY_HIDDEN, type ControlState, type Element, type FieldKind } from './exportMarkup';
 
 const JUSTIFY_CSS = { start: 'flex-start', center: 'center', end: 'flex-end', 'space-between': 'space-between' } as const;
 const ALIGN_CSS = { start: 'flex-start', center: 'center', end: 'flex-end', stretch: 'stretch' } as const;
 
+/** 묶어 받을 때의 텍스트 파일 하나. path는 묶음 안의 상대 경로(폴더 구분은 /)다. */
+export interface ExportFile { path: string; data: string }
+
 /**
- * 내보낸 결과. code는 TSX이고 첫 줄들에서 cssFile(같은 폴더의 CSS 파일, 내용은 css)과 그림을 import한다.
+ * 내보낸 결과. code는 미리보기용 한 파일 TSX이고 첫 줄들에서 cssFile(같은 폴더의 CSS 파일, 내용은 css)과 그림을 import한다.
+ * files는 프로젝트에 넣을 형태로 나눈 파일들이다(화면 파일, components/컴포넌트별 TSX·CSS, components/index.ts, tokens.css).
  * assets는 코드와 CSS가 쓰는 그림 id 목록이다(묶어 받기용).
  */
-export interface ExportResult { name: string; code: string; css: string; cssFile: string; assets: string[] }
+export interface ExportResult { name: string; code: string; css: string; cssFile: string; assets: string[]; files: ExportFile[] }
 
 /** assetFile: 그림 id → assets 폴더 안의 파일 이름(확장자 포함). 없으면 id를 그대로 쓴다. */
 export interface ExportOptions { assetFile?: (assetId: string) => string }
@@ -29,6 +33,46 @@ function propertyName(node: DesignNode, index: number): string {
   const name = identifier(node.name);
   return `${name[0]!.toLowerCase()}${name.slice(1)}${index}`;
 }
+
+/** 디자인 도구가 붙인 기본 이름(Frame 12, Group, Rectangle 3, Auto layout 등). 클래스 이름으로 쓰면 뜻이 없다. */
+const GENERIC_LAYER = /^(frame|group|rectangle|rect|ellipse|vector|line|polygon|star|union|subtract|intersect|intersection|exclude|layer|text|auto-layout|container|div|instance|component|shape|image|img|bounding-box|mask|path|el)?(-copy)?(-\d+)*$/;
+
+/**
+ * 레이어 이름에서 뜻 있는 클래스 조각. 기본 이름, 숫자가 긴 이름(frame-1707482846), 글 내용을 그대로 쓴 글자 레이어 이름은 버린다.
+ * 'Button/Primary', '24/Arrow forward' 같은 경로 이름은 전체를, 안 되면 마지막 조각을 쓰고, 길면 앞 네 단어만 남긴다.
+ */
+function meaningfulName(node: Pick<DesignNode, 'name' | 'type' | 'text'>): string | undefined {
+  // 글자 레이어 이름은 기본으로 글 내용이다. 두 단어까지(Title, Help text)는 이름으로 쓰고, 문장이면 버린다.
+  if (node.type === 'text' && node.text !== undefined && node.name.trim() === node.text.trim() && node.text.trim().split(/\s+/).length > 2) return undefined;
+  for (const raw of [node.name, cleanName(node.name)]) {
+    const name = kebab(raw, '');
+    if (!name || name.startsWith('-') || /\d{4,}/.test(name) || GENERIC_LAYER.test(name)) continue;
+    return name.split('-').slice(0, 4).join('-');
+  }
+  return undefined;
+}
+
+/** 이름에 뜻이 없을 때 쓰는 역할 이름. 요소 종류·레이아웃 방향·그림 여부로 고른다(title, text, icon, row, stack 등). */
+function roleClass(node: DesignNode, element: Element): string {
+  const tags: Record<string, string> = {
+    h1: 'title', h2: 'title', h3: 'title', p: 'text', a: 'link', button: 'button', img: 'image', svg: 'icon', input: 'input', textarea: 'input',
+    nav: 'nav', header: 'header', footer: 'footer', section: 'section'
+  };
+  if (element.tag === 'label') return node.type === 'text' ? 'label' : 'field';
+  if (tags[element.tag]) return tags[element.tag]!;
+  if (element.attrs.includes('aria-hidden="true"')) return 'icon';
+  if (node.type === 'text') return 'text';
+  if (node.layout) return node.layout.type === 'grid' ? 'grid' : node.layout.direction === 'row' ? 'row' : 'stack';
+  if (node.fills.some((paint) => paint.type === 'image')) return 'media';
+  if (!node.children?.length) return node.type === 'ellipse' ? 'circle' : 'shape';
+  return 'box';
+}
+
+/** JSX 안에서 변수 이름으로 쓸 수 없는 낱말. prop 이름이 이것과 같으면 구조 분해가 문법 오류가 된다. */
+const RESERVED = new Set(['break', 'case', 'catch', 'class', 'const', 'continue', 'debugger', 'default', 'delete', 'do', 'else', 'enum', 'export', 'extends', 'false', 'finally', 'for', 'function', 'if', 'import', 'in', 'instanceof', 'new', 'null', 'return', 'super', 'switch', 'this', 'throw', 'true', 'try', 'typeof', 'var', 'void', 'while', 'with', 'yield', 'let', 'static', 'implements', 'interface', 'package', 'private', 'protected', 'public', 'await', 'arguments', 'eval']);
+
+/** 컴포넌트 코드가 직접 쓰는 이름. prop이 이 이름을 가지면 덮어써지므로 피한다. */
+const LOCAL_NAMES = ['style', 'className', 'rest', 'props', 'fieldId', 'key', 'ref', 'children'];
 
 /** 스타일을 만들 때 도형 밖에서 알아야 하는 것. fluid는 화면 루트, control은 입력 요소(input·textarea), asset은 그림 파일 이름이다. */
 interface StyleHints { fluid?: boolean; control?: boolean; asset: (assetId: string) => string }
@@ -209,13 +253,26 @@ function withTypography(style: Style, node: DesignNode, vars: TokenVars): Style 
 interface ComponentPlan {
   name: string;
   members: Component[];
-  /** 텍스트 레이어 이름 → prop 이름. variant끼리 같은 이름의 텍스트는 같은 prop을 쓴다. 컴포넌트 속성에 연결된 텍스트는 빠진다. */
+  /**
+   * 텍스트 레이어 이름(같은 이름이 또 나오면 '이름#2') → prop 이름. variant끼리 같은 이름·순번의 텍스트는 같은 prop을 쓴다.
+   * 컴포넌트 속성에 연결된 텍스트는 빠진다. textKeys는 메인 안 텍스트 도형 id → prop 이름이다.
+   */
   textProps: Map<string, string>;
+  textKeys: Map<string, string>;
   /** 컴포넌트 속성 id → prop 이름·종류·기본값. 텍스트 속성은 문자열 prop, 불리언 속성은 조건부 렌더 prop이 된다. */
   componentProps: Map<string, { prop: string; type: 'text' | 'boolean'; defaultValue: string | boolean }>;
   variantProps: Array<{ key: string; prop: string; values: string[]; boolean: boolean }>;
   code: string[];
+  owner: Owner;
+  /** 컴포넌트 루트의 HTML 태그. 반복 항목에 role="listitem"을 줄 수 있는지(div일 때만) 볼 때 쓴다. */
+  rootTag?: string;
 }
+
+/** 파일 하나(컴포넌트 또는 화면)가 쓰는 것. 파일을 나눠 낼 때 import 줄을 만든다. */
+interface Owner { name: string; uses: Set<string>; images: Set<string>; usesId: boolean }
+
+/** 렌더 한 번의 결과. rules는 아직 파일 규칙(state.rules)에 붙이지 않은 이 렌더의 CSS 규칙이다. */
+interface Rendered { body: string[]; usesId: boolean; rules: CssRule[]; rootTag?: string }
 
 /**
  * 파일 하나를 만드는 동안의 상태. rules는 CSS 규칙을 쓸 순서대로 모은다(컴포넌트 규칙이 그것을 쓰는 쪽보다 앞).
@@ -262,6 +319,14 @@ interface RenderContext {
   usesId: boolean;
   /** 불리언 컴포넌트 속성으로 보이기가 정해지는 도형의 prop 이름과 기본값. 조건부 렌더로 낸다. */
   visibleProp?: (node: DesignNode) => { prop: string; defaultValue: boolean } | undefined;
+  /** 클래스 이름이 겹치지 않게 모으는 곳. variant를 합쳐 보는 시험 렌더는 따로 쓴다. */
+  classes: Set<string>;
+  owner: Owner;
+  /** 루트 요소에 더 붙일 속성(합친 variant의 data-* 속성). */
+  rootAttrs: string[];
+  rootTag?: string;
+  /** 불리언 속성 조건으로 이미 감싼 도형 id(같은 도형을 두 번 감싸지 않게). */
+  toggled: Set<string>;
 }
 
 /**
@@ -338,15 +403,23 @@ function elementOf(node: DesignNode, phrasing: boolean, context: RenderContext):
   if (field && node.id === field.labelId) { context.usesId = true; return { tag: 'label', attrs: ['htmlFor={fieldId}'], reset: { display: 'block' }, phrasing: true }; }
   if (field && node.id === field.boxId && field.kind.control === 'select') { context.usesId = true; return withDescription(selectBox(field.state), field); }
   if (node.id === context.rootId && context.choice) return { tag: 'label', attrs: [], reset: { display: 'block', cursor: 'pointer' }, phrasing: true };
+  // variant 루트의 레이어 이름은 'Size=Icon, Color=Blue'처럼 속성뿐이다. 역할은 세트 이름으로 고르고, 아이콘 버튼 이름은 아이콘 이름으로 한다.
+  const label = node.id === context.rootId && context.rootRoleName ? iconLabel(context, node) ?? cleanName(context.rootRoleName) : undefined;
   if (node.id === context.rootId && context.rootRoleName) node = { ...node, name: `${context.rootRoleName} ${node.name}` };
   // 아이콘만 든 버튼·링크는 버튼·링크가 먼저다(장식으로 숨기면 누를 수 있는 요소가 사라진다).
   const interactive = hasRole(node, 'button') || hasRole(node, 'link') || hasRole(node, 'input');
   if (!interactive && isIcon(context.page, node)) return { tag: 'span', attrs: ['aria-hidden="true"'], reset: { display: 'block' }, phrasing: true };
   const input = !phrasing && hasRole(node, 'input') ? firstText(context.page, node, context.hidden) : undefined;
   const any = hasRole(node, 'button') && walkPage(context.page, [node.id]).some((item) => item.type === 'text' && !context.hidden.has(item.id));
-  const element = boxElement(node, phrasing, { any, input: Boolean(input) });
+  const element = boxElement(node, phrasing, { any, input: Boolean(input), label });
   if (element.tag === 'label' && input) context.inputs.set(input.id, hasRole(node, 'password'));
   return element;
+}
+
+/** 글자 없는 버튼의 이름으로 쓸 첫 자식(아이콘 인스턴스 등)의 이름. 'ic/24/Search' → 'Search'. */
+function iconLabel(context: RenderContext, node: DesignNode): string | undefined {
+  const child = visibleChildren(context, node)[0];
+  return child && meaningfulName(child) ? cleanName(child.name) : undefined;
 }
 
 /** 좁은 화면 기준. 태블릿 세로 폭(768px)보다 좁으면 가로 배치를 세로로 쌓는다. */
@@ -381,45 +454,77 @@ function addRule(context: RenderContext, className: string, node: DesignNode, pa
   if ((element.tag === 'input' || element.tag === 'textarea') && final.color !== undefined) context.rules.push({ selector: `.${className}::placeholder`, style: { color: final.color, opacity: 1 } });
 }
 
-function classAttr(className: string, root: boolean): string {
-  return root ? `className={[${JSON.stringify(className)}, props.className].filter(Boolean).join(' ')} style={props.style}` : `className="${className}"`;
+/**
+ * 여는 태그의 속성들. 루트는 기본 속성(type, aria-label, data-*) 뒤에 나머지 HTML 속성(rest: onClick, aria-*, id 등)을 펼쳐
+ * 쓰는 쪽이 기본값을 바꿀 수 있게 하고, className은 밖에서 준 것을 더하며 style은 그대로 받는다.
+ */
+function openAttrs(className: string, root: boolean, attrs: string[], rootAttrs: string[]): string[] {
+  if (!root) return [`className="${className}"`, ...attrs];
+  return [...attrs, ...rootAttrs, '{...rest}', `className={[${JSON.stringify(className)}, className].filter(Boolean).join(' ')}`, 'style={style}'];
 }
 
 /** img 요소의 src. 그림은 파일 맨 위에서 import한다(번들러가 경로와 캐시 이름을 처리한다). */
-function imageSource(state: ExportState, assetId: string): string {
+function imageSource(context: RenderContext, assetId: string): string {
+  const { state } = context;
   state.assets.add(assetId);
+  context.owner.images.add(assetId);
   const existing = state.images.get(assetId);
   if (existing) return `src={${existing}}`;
-  const name = `image${state.images.size + 1}`;
+  const name = `imageSrc${state.images.size + 1}`;
   state.images.set(assetId, name);
   return `src={${name}}`;
 }
 
-/** 도형 하나를 JSX 줄로. 다른 컴포넌트의 인스턴스는 그 컴포넌트를 쓰는 한 줄이 된다. */
-function renderNode(node: DesignNode, parent: DesignNode | null, depth: number, context: RenderContext, phrasing = false): string[] {
+/** 요소 클래스 이름. 레이어 이름에 뜻이 있으면 그것을, 없으면 역할 이름(title, row, icon 등)을 블록 이름 뒤에 붙인다. */
+function elementClass(context: RenderContext, node: DesignNode, element: Element): string {
+  return uniqueIn(context.classes, `${context.block}__${meaningfulName(node) ?? roleClass(node, element)}`);
+}
+
+/**
+ * 같은 컴포넌트의 인스턴스만 셋 이상 든 div는 목록(role="list")이다(메뉴 항목, 카드 목록 등).
+ * 항목 컴포넌트의 루트가 div일 때만 목록으로 본다. 버튼·링크 루트에 listitem 역할을 주면 원래 역할이 사라진다.
+ */
+function isList(context: RenderContext, node: DesignNode, element: Element): boolean {
+  if (element.tag !== 'div' || node.id === context.rootId) return false;
+  const children = visibleChildren(context, node);
+  if (children.length < 3 || !children.every((child) => child.componentId && !child.mainInstance)) return false;
+  const keyOf = (child: DesignNode): string | undefined => { const component = context.state.doc.components[child.componentId!]; return component?.setId ?? component?.id; };
+  const key = keyOf(children[0]!);
+  if (!key || !children.every((child) => keyOf(child) === key)) return false;
+  return ensurePlan(context.state, children[0]!.componentId!)?.rootTag === 'div';
+}
+
+/** 도형 하나를 JSX 줄로. 다른 컴포넌트의 인스턴스는 그 컴포넌트를 쓰는 한 줄이 된다. listItem은 목록 부모 안의 항목인지다. */
+function renderNode(node: DesignNode, parent: DesignNode | null, depth: number, context: RenderContext, phrasing = false, listItem = false): string[] {
   const indent = '  '.repeat(depth);
   const root = node.id === context.rootId;
-  const toggle = root ? undefined : context.visibleProp?.(node);
+  const toggle = root || context.toggled.has(node.id) ? undefined : context.visibleProp?.(node);
   if (toggle) {
     // 불리언 속성: prop이 거짓이면 그리지 않는다. 기본값은 컴포넌트 속성의 기본값이다.
-    const inner = renderNode(node, parent, depth + 1, { ...context, visibleProp: undefined, rules: context.rules }, phrasing);
-    return [`${indent}{(props.${toggle.prop} ?? ${toggle.defaultValue}) && (`, ...inner, `${indent})}`];
+    // 같은 렌더 상태(useId 사용 여부 등)를 이어 쓰도록 문맥은 그대로 두고 이 도형만 다시 감싸지 않게 표시한다(하위 도형의 속성은 그대로 판정).
+    context.toggled.add(node.id);
+    const inner = renderNode(node, parent, depth + 1, context, phrasing, listItem);
+    context.toggled.delete(node.id);
+    return [`${indent}{(${toggle.prop} ?? ${toggle.defaultValue}) && (`, ...inner, `${indent})}`];
   }
-  if (node.componentId && !node.mainInstance && !root) return [`${indent}${usage(context, node, parent)}`];
+  if (node.componentId && !node.mainInstance && !root) return [`${indent}${usage(context, node, parent, listItem)}`];
   const element = elementOf(node, phrasing, context);
-  const className = root ? context.block : uniqueIn(context.state.classes, `${context.block}__${kebab(node.name)}`);
+  if (root) context.rootTag = element.tag;
+  const className = root ? context.block : elementClass(context, node, element);
   const masking = element.tag === 'img' || node.boolOp ? null : maskPlan(context, node);
   addRule(context, className, node, parent, element, masking?.self ? maskStyle(node, masking.self) : {});
-  const attrs = element.assetId ? [imageSource(context.state, element.assetId), ...element.attrs] : [...element.attrs];
+  const attrs = element.assetId ? [imageSource(context, element.assetId), ...element.attrs] : [...element.attrs];
   const described = context.field?.described.get(node.id);
   if (described) attrs.unshift(`id={\`\${fieldId}-${described}\`}`);
-  const open = [element.tag, classAttr(className, root), ...attrs].join(' ');
+  const list = !masking && isList(context, node, element);
+  if (list) attrs.push('role="list"');
+  const open = [element.tag, ...openAttrs(className, root, attrs, context.rootAttrs)].join(' ');
   if (node.type === 'text') return [`${indent}${textJsx(node, element, open, className, context)}`];
   if (node.path || node.type === 'vector') return [`${indent}<${open} ${vectorBody(node)}</svg>`];
   const childPhrasing = phrasing || element.phrasing;
   const body = masking
     ? masking.runs.flatMap((run) => renderRun(run, node, depth + 1, context, childPhrasing))
-    : (element.tag === 'img' ? [] : visibleChildren(context, node)).flatMap((child) => renderNode(child, node, depth + 1, context, childPhrasing));
+    : (element.tag === 'img' ? [] : visibleChildren(context, node)).flatMap((child) => renderNode(child, node, depth + 1, context, childPhrasing, list));
   const extra = root && context.choice ? [`${indent}  ${choiceInput(context)}`] : [];
   if (body.length === 0 && extra.length === 0) return [`${indent}<${open} />`];
   return [`${indent}<${open}>`, ...extra, ...body, `${indent}</${element.tag}>`];
@@ -452,7 +557,7 @@ function renderRun(run: { mask?: DesignNode; ids: string[] }, parent: DesignNode
   if (!run.mask) return nodes.flatMap((child) => renderNode(child, parent, depth, context, phrasing));
   const indent = '  '.repeat(depth);
   const tag = phrasing ? 'span' : 'div';
-  const className = uniqueIn(context.state.classes, `${context.block}__${kebab(run.mask.name)}-mask`);
+  const className = uniqueIn(context.classes, `${context.block}__mask`);
   context.rules.push({ selector: `.${className}`, style: { display: 'block', position: 'absolute', left: 0, top: 0, width: '100%', height: '100%', ...maskStyle(parent, run.mask) } });
   return [`${indent}<${tag} className="${className}">`, ...nodes.flatMap((child) => renderNode(child, parent, depth + 1, context, phrasing)), `${indent}</${tag}>`];
 }
@@ -460,7 +565,7 @@ function renderRun(run: { mask?: DesignNode; ids: string[] }, parent: DesignNode
 /** radio·checkbox의 실제 input. 화면에서는 숨기고(디자인의 동그라미가 보임) 보조 기술과 키보드가 쓴다. */
 function choiceInput(context: RenderContext): string {
   const choice = context.choice!;
-  const className = uniqueIn(context.state.classes, `${context.block}__control`);
+  const className = uniqueIn(context.classes, `${context.block}__control`);
   context.rules.push({ selector: `.${className}`, style: VISUALLY_HIDDEN });
   const attrs = [`type="${choice.type}"`, ...(choice.state.checked ? ['defaultChecked'] : []), ...(choice.state.disabled ? ['disabled'] : [])];
   return `<input className="${className}" ${attrs.join(' ')} />`;
@@ -472,7 +577,7 @@ function choiceInput(context: RenderContext): string {
  */
 function textJsx(node: DesignNode, element: Element, open: string, className: string, context: RenderContext): string {
   const prop = context.textProp(node);
-  const fallback = prop ? `props.${prop} ?? ` : '';
+  const fallback = prop ? `${prop} ?? ` : '';
   if (element.tag === 'input' || element.tag === 'textarea') {
     const valueAttr = context.field?.controlId === node.id && context.field.state.filled ? 'defaultValue' : 'placeholder';
     return `<${open} ${valueAttr}={${fallback}${JSON.stringify(node.text ?? '')}} />`;
@@ -485,7 +590,7 @@ function textJsx(node: DesignNode, element: Element, open: string, className: st
 function spanRuns(node: DesignNode, className: string, context: RenderContext): string {
   const parts = textRuns(node).map((run) => {
     if (!run.span) return `{${JSON.stringify(run.text)}}`;
-    const runClass = uniqueIn(context.state.classes, `${className}-run`);
+    const runClass = uniqueIn(context.classes, `${className}-run`);
     const style: Style = {};
     if (run.span.fontSize !== undefined) style.fontSize = run.span.fontSize;
     if (run.span.fontWeight !== undefined) style.fontWeight = run.span.fontWeight;
@@ -522,15 +627,18 @@ function ensurePlan(state: ExportState, componentId: string): ComponentPlan | nu
   const existing = state.plans.get(key);
   if (existing) return existing;
   const members = component.setId ? Object.values(state.doc.components).filter((item) => item.setId === component.setId) : [component];
-  const plan: ComponentPlan = { name: uniqueName(state, identifier(component.name)), members, textProps: new Map(), componentProps: new Map(), variantProps: [], code: [] };
+  const name = uniqueName(state, identifier(component.name));
+  const plan: ComponentPlan = { name, members, textProps: new Map(), textKeys: new Map(), componentProps: new Map(), variantProps: [], code: [], owner: { name, uses: new Set(), images: new Set(), usesId: false } };
   state.plans.set(key, plan);
-  const taken = new Set(['style', 'className']);
+  const taken = new Set(LOCAL_NAMES);
   const propName = (label: string): string => {
     const base = identifier(label);
-    let name = `${base[0]!.toLowerCase()}${base.slice(1)}`;
-    for (let index = 2; taken.has(name); index++) name = `${base[0]!.toLowerCase()}${base.slice(1)}${index}`;
-    taken.add(name);
-    return name;
+    const lower = `${base[0]!.toLowerCase()}${base.slice(1)}`;
+    const start = RESERVED.has(lower) ? `${lower}Value` : lower;
+    let next = start;
+    for (let index = 2; taken.has(next); index++) next = `${start}${index}`;
+    taken.add(next);
+    return next;
   };
   const keys = [...new Set(members.flatMap((member) => Object.keys(member.variant ?? {})))];
   plan.variantProps = keys.map((variantKey) => {
@@ -543,8 +651,17 @@ function ensurePlan(state: ExportState, componentId: string): ComponentPlan | nu
     for (const prop of member.props ?? []) {
       if (!plan.componentProps.has(prop.id)) plan.componentProps.set(prop.id, { prop: propName(prop.name), type: prop.type, defaultValue: prop.defaultValue });
     }
+    // 한 메인 안에 같은 이름의 글자가 여럿이면(목록의 'Documentation' 두 개) 순번으로 나눠 prop이 겹치지 않게 한다.
+    const seen = new Map<string, number>();
     for (const node of walkPage(main.page, [main.node.id])) {
-      if (node.type === 'text' && !node.propRefs?.text && !insideNestedInstance(main.page, node, main.node.id) && !plan.textProps.has(node.name)) plan.textProps.set(node.name, propName(node.name));
+      if (node.type !== 'text' || node.propRefs?.text || insideNestedInstance(main.page, node, main.node.id)) continue;
+      const count = (seen.get(node.name) ?? 0) + 1;
+      seen.set(node.name, count);
+      const key = count > 1 ? `${node.name}#${count}` : node.name;
+      // 이름에 뜻이 없으면(0/40, DD-MM-YYYY, 문장) 역할 이름(title, text)으로 prop을 짓는다.
+      const label = meaningfulName(node) ? node.name : looksLikeTitle(node) ? 'title' : 'text';
+      if (!plan.textProps.has(key)) plan.textProps.set(key, propName(count > 1 ? `${label} ${count}` : label));
+      plan.textKeys.set(node.id, plan.textProps.get(key)!);
     }
   }
   plan.code = componentCode(state, plan);
@@ -568,79 +685,275 @@ function insideNestedInstance(page: Page, node: DesignNode, rootId: string): boo
   return false;
 }
 
-/** 루트를 렌더할 때의 선택 사항. member가 있으면 컴포넌트(variant 하나)를 렌더하는 중이다. fluid는 화면 루트다. */
-interface RootOptions { textProp: RenderContext['textProp']; member?: Component; fluid?: boolean; visibleProp?: RenderContext['visibleProp'] }
-
-/** 루트 하나를 렌더하고, 만든 CSS 규칙을 파일 규칙 뒤에 붙인다. 안에서 처음 쓰인 컴포넌트의 규칙은 이미 앞에 붙어 있다. */
-function renderRoot(state: ExportState, page: Page, root: DesignNode, blockName: string, options: RootOptions): { body: string[]; usesId: boolean } {
-  const hidden = hiddenIn(page, root.id, (node) => Boolean(options.visibleProp?.(node)));
-  const variant = options.member?.variant;
-  const context: RenderContext = {
-    state, page, hidden, rootId: root.id, textProp: options.textProp, visibleProp: options.visibleProp, block: uniqueIn(state.classes, kebab(blockName)), rules: [], inputs: new Map(),
-    rootRoleName: options.member?.name, component: Boolean(options.member), fluid: Boolean(options.fluid), usesId: false,
-    field: options.member ? planField(page, hidden, root, variant) : undefined,
-    choice: options.member ? planChoice(page, root, options.member.name, variant) : undefined
-  };
-  const body = renderNode(root, null, 2, context);
-  state.rules.push(...context.rules);
-  if (context.usesId) state.usesId = true;
-  return { body, usesId: context.usesId };
+/**
+ * 루트를 렌더할 때의 선택 사항. member가 있으면 컴포넌트(variant 하나)를 렌더하는 중이다. fluid는 화면 루트다.
+ * block·classes를 주면 그 블록 이름과 클래스 모음을 쓴다(variant를 합쳐 보는 시험 렌더). rootAttrs는 루트에 더 붙일 속성이다.
+ */
+interface RootOptions {
+  textProp: RenderContext['textProp']; owner: Owner; member?: Component; fluid?: boolean; visibleProp?: RenderContext['visibleProp'];
+  block?: string; classes?: Set<string>; rootAttrs?: string[];
 }
 
-/** 함수 컴포넌트 본문. 폼 필드면 제목과 입력을 잇는 id를 useId로 만든다. */
-function functionLines(signature: string, rendered: { body: string[]; usesId: boolean }): string[] {
-  return [`${signature} {`, ...(rendered.usesId ? ['  const fieldId = useId();'] : []), '  return (', ...rendered.body, '  );', '}', ''];
+/** 루트 하나를 렌더한다. 만든 CSS 규칙은 돌려주기만 하고 파일 규칙에 붙이는 것은 부른 쪽이 정한다(합칠 수 있는지 보고 나서). */
+function renderRoot(state: ExportState, page: Page, root: DesignNode, blockName: string, options: RootOptions): Rendered {
+  const hidden = hiddenIn(page, root.id, (node) => Boolean(options.visibleProp?.(node)));
+  const variant = options.member?.variant;
+  const classes = options.classes ?? state.classes;
+  const context: RenderContext = {
+    state, page, hidden, rootId: root.id, textProp: options.textProp, visibleProp: options.visibleProp, block: options.block ?? uniqueIn(classes, kebab(blockName)), rules: [], inputs: new Map(),
+    rootRoleName: options.member?.name, component: Boolean(options.member), fluid: Boolean(options.fluid), usesId: false,
+    field: options.member ? planField(page, hidden, root, variant) : undefined,
+    choice: options.member ? planChoice(page, root, options.member.name, variant) : undefined,
+    classes, owner: options.owner, rootAttrs: options.rootAttrs ?? [], toggled: new Set()
+  };
+  const body = renderNode(root, null, 2, context);
+  return { body, usesId: context.usesId, rules: context.rules.map((rule) => ({ ...rule, owner: options.owner.name })), rootTag: context.rootTag };
+}
+
+/** 렌더 결과를 파일에 반영한다(CSS 규칙, useId 사용). */
+function commit(state: ExportState, owner: Owner, rendered: Rendered): Rendered {
+  state.rules.push(...rendered.rules);
+  if (rendered.usesId) { state.usesId = true; owner.usesId = true; }
+  return rendered;
+}
+
+/**
+ * 함수 컴포넌트 본문. props를 구조 분해해 직접 정의한 prop은 이름으로 쓰고, 나머지 HTML 속성(rest)은 루트에 넘긴다.
+ * 폼 필드면 제목과 입력을 잇는 id를 useId로 만든다.
+ */
+function functionLines(signature: string, names: string[], rendered: Rendered): string[] {
+  const destructure = `  const { className, style, ${names.map((name) => `${name}, `).join('')}...rest } = props;`;
+  return [`${signature} {`, destructure, ...(rendered.usesId ? ['  const fieldId = useId();'] : []), '  return (', ...rendered.body, '  );', '}', ''];
+}
+
+/** 컴포넌트가 정의한 prop 이름 전부(구조 분해와 HTML 속성 타입에서 뺄 이름). */
+function planPropNames(plan: ComponentPlan): string[] {
+  return [...plan.variantProps.map((item) => item.prop), ...[...plan.componentProps.values()].map((item) => item.prop), ...plan.textProps.values()];
+}
+
+/** Props 타입. 직접 정의한 prop 외에 HTML 속성(onClick, id, aria-*, data-* 등)을 받는다. 같은 이름의 HTML 속성은 정의한 prop이 이긴다. */
+function propsInterface(name: string, names: string[], lines: string[]): string[] {
+  const omitted = ['children', 'dangerouslySetInnerHTML', ...names].map((item) => JSON.stringify(item)).join(' | ');
+  return [`export interface ${name}Props extends Omit<HTMLAttributes<HTMLElement>, ${omitted}> {`, ...lines, '}', ''];
 }
 
 function componentCode(state: ExportState, plan: ComponentPlan): string[] {
   const props = [
-    '  className?: string;',
-    '  style?: CSSProperties;',
     ...plan.variantProps.map((item) => `  ${item.prop}?: ${item.boolean ? 'boolean' : item.values.map((value) => JSON.stringify(value)).join(' | ')};`),
     ...[...plan.componentProps.values()].map((item) => `  ${item.prop}?: ${item.type === 'boolean' ? 'boolean' : 'string'};`),
     ...[...plan.textProps.values()].map((prop) => `  ${prop}?: string;`)
   ];
-  const lines = [`export interface ${plan.name}Props {`, ...props, '}', ''];
-  // 이름에서 기호를 빼면 variant끼리 같아질 수 있다(예: 'Date range'와 'date-range'). 함수 이름은 파일 안에서 겹치지 않게 만든다.
-  const renderers = plan.members.map((member) => ({ member, fn: plan.members.length > 1 ? uniqueName(state, `${plan.name}__${identifier(variantName(member.variant ?? {}) || member.id)}`) : plan.name }));
-  if (plan.members.length > 1) {
-    const first = plan.members[0]!;
-    const condition = (member: Component): string => plan.variantProps.map((item) => {
-      const value = member.variant?.[item.key] ?? '';
-      const fallback = first.variant?.[item.key] ?? '';
-      return item.boolean ? `(props.${item.prop} ?? ${fallback.toLowerCase() === 'true'}) === ${value.toLowerCase() === 'true'}` : `(props.${item.prop} ?? ${JSON.stringify(fallback)}) === ${JSON.stringify(value)}`;
-    }).join(' && ') || 'true';
-    lines.push(`export function ${plan.name}(props: ${plan.name}Props) {`, ...renderers.slice(1).map(({ member, fn }) => `  if (${condition(member)}) return <${fn} {...props} />;`), `  return <${renderers[0]!.fn} {...props} />;`, '}', '');
+  const names = planPropNames(plan);
+  const lines = propsInterface(plan.name, names, props);
+  const groups = plan.members.length > 1 ? variantGroups(state, plan) : null;
+  const only = groups?.length === 1 ? groups[0]!.rendered : null;
+  if (only) {
+    plan.rootTag = only.rootTag;
+    lines.push(...functionLines(`export function ${plan.name}(props: ${plan.name}Props)`, names, commit(state, plan.owner, only)));
+    return lines;
   }
-  for (const { member, fn } of renderers) {
-    const main = mainOf(state.doc, member);
-    if (!main) continue;
-    const own = (node: DesignNode): boolean => !insideNestedInstance(main.page, node, main.node.id);
-    const textProp = (node: DesignNode): string | undefined => {
-      if (!own(node)) return undefined;
-      const bound = node.propRefs?.text ? plan.componentProps.get(node.propRefs.text) : undefined;
-      return bound?.prop ?? (node.propRefs?.text ? undefined : plan.textProps.get(node.name));
-    };
-    const visibleProp = (node: DesignNode): { prop: string; defaultValue: boolean } | undefined => {
-      const bound = node.propRefs?.visible ? plan.componentProps.get(node.propRefs.visible) : undefined;
-      // 이 메인에 속한 참조만(중첩 인스턴스 안의 참조는 그 컴포넌트의 속성이다).
-      return bound?.type === 'boolean' && propOwnerId(main.page, node) === main.node.id ? { prop: bound.prop, defaultValue: bound.defaultValue === true } : undefined;
-    };
-    const rendered = renderRoot(state, main.page, main.node, fn, { member, textProp, visibleProp });
-    lines.push(...functionLines(`${plan.members.length > 1 ? '' : 'export '}function ${fn}(props: ${plan.name}Props)`, rendered));
+  // 묶음이 없으면 variant마다 함수 하나다. 이름에서 기호를 빼면 variant끼리 같아질 수 있어(예: 'Date range'와 'date-range') 함수 이름은 파일 안에서 겹치지 않게 만든다.
+  const parts = groups ?? plan.members.map((member) => {
+    const fn = plan.members.length > 1 ? uniqueName(state, `${plan.name}__${identifier(variantName(member.variant ?? {}) || member.id)}`) : plan.name;
+    return { members: [member], fn, rendered: renderMember(state, plan, member, { fn }) };
+  });
+  if (plan.members.length > 1) {
+    const ref = (prop: string): string => `props.${prop}`;
+    const [head, ...rest] = parts.filter((part) => part.rendered);
+    lines.push(`export function ${plan.name}(props: ${plan.name}Props) {`, ...rest.map((part) => `  if (${setCondition(plan, part.members, plan.members, ref)}) return <${part.fn} {...props} />;`), ...(head ? [`  return <${head.fn} {...props} />;`] : ['  return null;']), '}', '');
+  }
+  for (const part of parts) {
+    if (!part.rendered) continue;
+    plan.rootTag ??= part.rendered.rootTag;
+    lines.push(...functionLines(`${plan.members.length > 1 ? '' : 'export '}function ${part.fn}(props: ${plan.name}Props)`, names, commit(state, plan.owner, part.rendered)));
   }
   return lines;
 }
 
-/** 인스턴스를 컴포넌트 사용 한 줄로. variant 값과, 메인과 다른 텍스트만 props로 넘긴다. 위치는 부모 쪽 클래스로 준다. */
-function usage(context: RenderContext, node: DesignNode, parent: DesignNode | null): string {
+/** variant 하나(메인 컴포넌트)를 렌더한다. 텍스트·불리언 prop은 이 메인에 속한 도형에만 잇는다(중첩 인스턴스 안은 그 컴포넌트의 것). */
+function renderMember(state: ExportState, plan: ComponentPlan, member: Component, options: { fn: string; block?: string; classes?: Set<string>; rootAttrs?: string[] }): Rendered | null {
+  const main = mainOf(state.doc, member);
+  if (!main) return null;
+  const own = (node: DesignNode): boolean => !insideNestedInstance(main.page, node, main.node.id);
+  const textProp = (node: DesignNode): string | undefined => {
+    if (!own(node)) return undefined;
+    const bound = node.propRefs?.text ? plan.componentProps.get(node.propRefs.text) : undefined;
+    return bound?.prop ?? (node.propRefs?.text ? undefined : plan.textKeys.get(node.id));
+  };
+  const visibleProp = (node: DesignNode): { prop: string; defaultValue: boolean } | undefined => {
+    const bound = node.propRefs?.visible ? plan.componentProps.get(node.propRefs.visible) : undefined;
+    return bound?.type === 'boolean' && propOwnerId(main.page, node) === main.node.id ? { prop: bound.prop, defaultValue: bound.defaultValue === true } : undefined;
+  };
+  return renderRoot(state, main.page, main.node, options.fn, { member, textProp, visibleProp, owner: plan.owner, block: options.block, classes: options.classes, rootAttrs: options.rootAttrs });
+}
+
+/** variant 값을 루트 data 속성 선택자로. 값은 화면에 쓰는 글자 그대로이고 불리언은 true·false다. */
+function variantSelector(plan: ComponentPlan, member: Component): string {
+  return plan.variantProps.map((item) => {
+    const raw = member.variant?.[item.key] ?? '';
+    return `[data-${kebab(item.prop)}=${JSON.stringify(item.boolean ? raw.toLowerCase() : raw)}]`;
+  }).join('');
+}
+
+/** variant prop의 현재 값 식. 값이 없으면 세트 첫 variant의 값이다. ref는 prop을 읽는 식(props.size 또는 size)이다. */
+function variantValue(plan: ComponentPlan, item: ComponentPlan['variantProps'][number], ref: (prop: string) => string): string {
+  const fallback = plan.members[0]!.variant?.[item.key] ?? '';
+  return `(${ref(item.prop)} ?? ${item.boolean ? fallback.toLowerCase() === 'true' : JSON.stringify(fallback)})`;
+}
+
+/**
+ * universe 중 chosen variant들만 참이 되는 조건식. variant 속성 하나의 값만으로 가를 수 있으면 그 속성만 쓰고(size === "L"),
+ * 안 되면 variant마다 모든 속성을 비교하는 식을 ||로 잇는다.
+ */
+function setCondition(plan: ComponentPlan, chosen: readonly Component[], universe: readonly Component[], ref: (prop: string) => string): string {
+  const valueOf = (member: Component, key: string): string => member.variant?.[key] ?? '';
+  // 속성마다 chosen이 쓰는 값만 허용하는 조건을 AND로 묶어, universe에서 정확히 chosen만 고르면 그 식을 쓴다(Type === "area" && [...].includes(State)).
+  const narrowing = plan.variantProps.map((item) => ({ item, values: [...new Set(chosen.map((member) => valueOf(member, item.key)))] }))
+    .filter(({ item, values }) => universe.some((member) => !values.includes(valueOf(member, item.key))));
+  const exact = universe.every((member) => chosen.includes(member) === narrowing.every(({ item, values }) => values.includes(valueOf(member, item.key))));
+  if (exact) {
+    return narrowing.map(({ item, values }) => {
+      const current = variantValue(plan, item, ref);
+      if (item.boolean) return `${current} === ${values[0]!.toLowerCase() === 'true'}`;
+      return values.length === 1 ? `${current} === ${JSON.stringify(values[0])}` : `[${values.map((value) => JSON.stringify(value)).join(', ')}].includes(${current.slice(1, -1)})`;
+    }).join(' && ') || 'true';
+  }
+  return chosen.map((member) => `(${plan.variantProps.map((item) => {
+    const value = valueOf(member, item.key);
+    return `${variantValue(plan, item, ref)} === ${item.boolean ? value.toLowerCase() === 'true' : JSON.stringify(value)}`;
+  }).join(' && ') || 'true'})`).join(' || ');
+}
+
+/** 기준 스타일과 다른 선언만. 기준에만 있는 선언은 unset으로 지운다. */
+function styleDiff(base: Style, next: Style): Style {
+  const diff: Style = {};
+  for (const [key, value] of Object.entries(next)) if (base[key] !== value) diff[key] = value;
+  for (const key of Object.keys(base)) if (!(key in next)) diff[key] = 'unset';
+  return diff;
+}
+
+/** variant마다 달라도 같은 구조로 보는 상태 속성. 합칠 때 variant 조건식 속성(disabled={…})으로 바꾼다. */
+const FLAG_ATTRS = / (disabled|readOnly|defaultChecked|aria-invalid="true")(?=[ />])/g;
+
+/** 구조 비교용 모양. 상태 속성을 뺀 JSX와 CSS 선택자 목록이다. */
+function structureOf(rendered: Rendered): string {
+  return [...rendered.body.map((line) => line.replace(FLAG_ATTRS, '')), ...rendered.rules.map((rule) => `${rule.selector}@${rule.media ?? ''}`)].join('\n');
+}
+
+/** 합칠 variant 묶음 하나. rendered가 없으면 메인을 찾지 못한 variant다. */
+interface VariantGroup { members: Component[]; fn: string; rendered: Rendered | null }
+
+/**
+ * 구조(태그·클래스·글자·prop 연결)가 같은 variant끼리 묶는다. 묶음마다 함수 하나이고, 묶음 안의 variant 차이는 data 속성 CSS로 낸다.
+ * 모두 한 묶음이면 함수 하나, 여러 묶음이면 variant 값으로 묶음을 고르는 함수가 앞에 선다(Form의 Type별 함수 + State는 CSS).
+ * 어떤 variant도 합쳐지지 않으면 null(variant마다 함수).
+ */
+function variantGroups(state: ExportState, plan: ComponentPlan): VariantGroup[] | null {
+  const trial = renderTrial(state, plan, plan.members, kebab(plan.name));
+  if (!trial) return null;
+  const byShape = new Map<string, Component[]>();
+  trial.forEach(({ member, rendered }) => {
+    const key = structureOf(rendered);
+    byShape.set(key, [...(byShape.get(key) ?? []), member]);
+  });
+  if (byShape.size === plan.members.length) return null;
+  const single = byShape.size === 1;
+  return [...byShape.values()].map((members) => {
+    if (members.length === 1) {
+      const fn = uniqueName(state, `${plan.name}__${identifier(variantName(members[0]!.variant ?? {}) || members[0]!.id)}`);
+      return { members, fn, rendered: renderMember(state, plan, members[0]!, { fn }) };
+    }
+    const fn = single ? plan.name : uniqueName(state, `${plan.name}__${groupLabel(plan, members)}`);
+    return { members, fn, rendered: mergeGroup(state, plan, members, fn) };
+  });
+}
+
+/** 묶음 함수 이름 꼬리. 묶음 안에서 값이 하나뿐인 variant 속성 값들(예: Type=area → Area)이다. */
+function groupLabel(plan: ComponentPlan, members: readonly Component[]): string {
+  const fixed = plan.variantProps.map((item) => [...new Set(members.map((member) => member.variant?.[item.key] ?? ''))]).filter((values) => values.length === 1).map((values) => values[0]!);
+  return identifier(fixed.join(' ') || 'Group');
+}
+
+/** 루트 data 속성(합친 variant의 CSS가 고르는 값). */
+function variantAttrs(plan: ComponentPlan): string[] {
+  return plan.variantProps.map((item) => {
+    const current = variantValue(plan, item, (prop) => prop);
+    const inner = current.slice(1, -1);
+    return `data-${kebab(item.prop)}={${item.boolean ? `String(${inner})` : inner}}`;
+  });
+}
+
+/** 같은 블록 이름·클래스 출발점으로 variant들을 렌더한다(구조 비교와 합치기용). 클래스 모음은 각자 복사본을 쓴다. */
+function renderTrial(state: ExportState, plan: ComponentPlan, members: readonly Component[], blockName: string): Array<{ member: Component; rendered: Rendered; classes: Set<string>; block: string }> | null {
+  const base = new Set(state.classes);
+  const block = uniqueIn(base, blockName);
+  const rootAttrs = variantAttrs(plan);
+  const trials = [];
+  for (const member of members) {
+    const classes = new Set(base);
+    const rendered = renderMember(state, plan, member, { fn: plan.name, block, classes, rootAttrs });
+    if (!rendered) return null;
+    trials.push({ member, rendered, classes, block });
+  }
+  return trials;
+}
+
+/**
+ * 구조가 같은 variant들을 함수 하나로 합친다. 첫 variant의 규칙이 기본이고, 나머지는 다른 선언만 `.블록:where([data-…])` 아래에 낸다.
+ * :where는 우선순위를 올리지 않아 인스턴스 위치 클래스가 계속 이긴다. 상태 속성(disabled 등)은 variant 조건식이 된다.
+ */
+function mergeGroup(state: ExportState, plan: ComponentPlan, members: readonly Component[], fn: string): Rendered | null {
+  const trials = renderTrial(state, plan, members, kebab(fn));
+  const head = trials?.[0];
+  if (!trials || !head || trials.some((trial) => structureOf(trial.rendered) !== structureOf(head.rendered))) return null;
+  for (const name of head.classes) state.classes.add(name);
+  const body = head.rendered.body.map((line, index) => mergeFlags(plan, members, trials.map((trial) => trial.rendered.body[index] ?? ''), line));
+  const rules = [...head.rendered.rules];
+  for (const trial of trials.slice(1)) {
+    const scope = `.${head.block}:where(${variantSelector(plan, trial.member)})`;
+    trial.rendered.rules.forEach((rule, index) => {
+      const diff = styleDiff(head.rendered.rules[index]!.style, rule.style);
+      if (Object.keys(diff).length === 0) return;
+      const root = rule.selector === `.${head.block}`;
+      rules.push({ ...rule, selector: root ? scope : `${scope} ${rule.selector}`, style: diff, keepOrder: root || rule.keepOrder });
+    });
+  }
+  return { ...head.rendered, body, rules };
+}
+
+/** 한 줄에서 variant마다 다른 상태 속성을 조건식 속성으로. 모두 같으면 줄을 그대로 둔다. */
+function mergeFlags(plan: ComponentPlan, members: readonly Component[], lines: readonly string[], line: string): string {
+  const flagsOf = (text: string): string[] => [...text.matchAll(FLAG_ATTRS)].map((match) => match[1]!);
+  const sets = lines.map(flagsOf);
+  const all = [...new Set(sets.flat())];
+  if (all.every((flag) => sets.every((set) => set.includes(flag)))) return line;
+  const attrs = all.map((flag) => {
+    const chosen = members.filter((_, index) => sets[index]!.includes(flag));
+    const condition = setCondition(plan, chosen, members, (prop) => prop);
+    // aria-invalid는 false여도 속성이 남으므로, 거짓이면 속성 자체를 빼도록 undefined로 둔다.
+    return flag.startsWith('aria-invalid') ? `aria-invalid={(${condition}) || undefined}` : `${flag}={${condition}}`;
+  });
+  return line.replace(FLAG_ATTRS, '').replace(/^(\s*<[a-zA-Z][a-zA-Z0-9]*)/, `$1 ${attrs.join(' ')}`);
+}
+
+/**
+ * 인스턴스를 컴포넌트 사용 한 줄로. variant 값과, 메인과 다른 텍스트만 props로 넘긴다. 위치는 부모 쪽 클래스로 준다.
+ * listItem이면 목록 항목 역할을 붙인다(컴포넌트가 나머지 HTML 속성을 루트에 넘긴다).
+ */
+function usage(context: RenderContext, node: DesignNode, parent: DesignNode | null, listItem = false): string {
   const { state, page } = context;
   const component = node.componentId ? state.doc.components[node.componentId] : undefined;
   const plan = node.componentId ? ensurePlan(state, node.componentId) : null;
   if (!component || !plan) return `{/* 컴포넌트 ${node.componentId ?? ''} 없음 */}`;
-  const className = uniqueIn(state.classes, `${context.block}__${kebab(node.name)}`);
-  context.rules.push({ selector: `.${className}`, style: placement(node, parent), keepOrder: true });
-  const attrs = [`className="${className}"`];
+  if (plan.owner !== context.owner) context.owner.uses.add(plan.name);
+  const className = uniqueIn(context.classes, `${context.block}__${meaningfulName(node) ?? kebab(plan.name)}`);
+  const style = placement(node, parent);
+  context.rules.push({ selector: `.${className}`, style, keepOrder: true });
+  // 컴포넌트 루트의 좁은 화면 규칙(오토 레이아웃 높이 풀기)은 컴포넌트 CSS 파일에 있다. 파일을 나누면 뒤에 붙는 이 파일의 위치 규칙 높이가
+  // 그것을 이기므로, 같은 규칙을 위치 클래스에도 둔다(한 파일로 낼 때와 같은 결과).
+  const main = mainOf(state.doc, component);
+  if (typeof style.height === 'number' && main?.node.layout) context.rules.push({ selector: `.${className}`, style: { height: 'auto', minHeight: round(main.node.height) }, media: NARROW_MEDIA });
+  const attrs = [`className="${className}"`, ...(listItem ? ['role="listitem"'] : [])];
   for (const item of plan.variantProps) {
     const value = component.variant?.[item.key];
     if (value !== undefined) attrs.push(item.boolean ? `${item.prop}={${value.toLowerCase() === 'true'}}` : `${item.prop}=${JSON.stringify(value)}`);
@@ -653,7 +966,7 @@ function usage(context: RenderContext, node: DesignNode, parent: DesignNode | nu
   for (const text of walkPage(page, [node.id])) {
     if (text.type !== 'text' || text.propRefs?.text || insideNestedInstance(page, text, node.id)) continue;
     const main = text.shapeRef ? findMainShape(state.doc, text.shapeRef) : undefined;
-    const prop = plan.textProps.get(main?.name ?? text.name);
+    const prop = main ? plan.textKeys.get(main.id) : undefined;
     if (prop && main && text.text !== main.text) attrs.push(`${prop}=${JSON.stringify(text.text ?? '')}`);
   }
   return `<${plan.name} ${attrs.join(' ')} />`;
@@ -681,13 +994,27 @@ export function exportTsx(doc: DesignDocument, pageId: string, selectedId: strin
     const plan = ensurePlan(state, componentId);
     if (plan) return result(state, plan.name);
   }
-  const name = uniqueName(state, identifier(root.name));
+  // 화면 이름도 레이어 기본 이름(Frame 1707482846)이면 Screen으로 둔다.
+  const name = uniqueName(state, meaningfulName({ ...root, type: 'frame' }) ? identifier(root.name) : 'Screen');
+  const owner: Owner = { name, uses: new Set(), images: new Set(), usesId: false };
   const hidden = hiddenIn(page, selectedId);
   const texts = walkPage(page, [selectedId]).filter((node) => node.type === 'text' && !hidden.has(node.id) && !(node.id !== selectedId && insideInstanceBelow(page, node, selectedId)));
-  const props = new Map(texts.map((node, index) => [node.id, propertyName(node, index)]));
-  const rendered = renderRoot(state, page, root, name, { textProp: (node) => props.get(node.id), fluid: true });
-  const own = [`export interface ${name}Props {`, '  className?: string;', '  style?: CSSProperties;', ...texts.map((node) => `  ${props.get(node.id)}?: string;`), '}', '', ...functionLines(`export function ${name}(props: ${name}Props)`, rendered)];
-  return result(state, name, own);
+  const props = new Map(texts.map((node, index) => [node.id, screenPropName(node, index)]));
+  const rendered = commit(state, owner, renderRoot(state, page, root, name, { textProp: (node) => props.get(node.id), fluid: true, owner }));
+  const names = texts.map((node) => props.get(node.id)!);
+  const own = [...propsInterface(name, names, names.map((prop) => `  ${prop}?: string;`)), ...functionLines(`export function ${name}(props: ${name}Props)`, names, rendered)];
+  return result(state, name, { owner, code: own });
+}
+
+/** 화면 글자 prop 이름. 글 내용이 이름인 레이어는 역할(title, text) 이름에 순번을 붙인다. */
+function screenPropName(node: DesignNode, index: number): string {
+  const name = meaningfulName(node);
+  const base = propertyName({ ...node, name: name ?? (looksLikeTitle(node) ? 'title' : 'text') }, index);
+  return RESERVED.has(base) || LOCAL_NAMES.includes(base) ? `${base}Text` : base;
+}
+
+function looksLikeTitle(node: DesignNode): boolean {
+  return (node.fontSize ?? 18) >= 24;
 }
 
 function insideInstanceBelow(page: Page, node: DesignNode, rootId: string): boolean {
@@ -695,12 +1022,48 @@ function insideInstanceBelow(page: Page, node: DesignNode, rootId: string): bool
   return false;
 }
 
-function result(state: ExportState, name: string, own: string[] = []): ExportResult {
+/** react import 줄. HTML 속성 타입은 항상, useId는 폼 필드가 있을 때만. */
+function reactImport(usesId: boolean): string {
+  return usesId ? "import { useId, type HTMLAttributes } from 'react';" : "import type { HTMLAttributes } from 'react';";
+}
+
+function result(state: ExportState, name: string, screen?: { owner: Owner; code: string[] }): ExportResult {
   const cssFile = `${name}.css`;
-  const react = state.usesId ? "import { useId, type CSSProperties } from 'react';" : "import type { CSSProperties } from 'react';";
   const images = [...state.images].map(([assetId, variable]) => `import ${variable} from './assets/${state.assetFile(assetId)}';`);
-  const code = [react, `import './${cssFile}';`, ...images, '', ...own, ...[...state.plans.values()].flatMap((plan) => plan.code)].join('\n');
-  return { name, code, css: cssText(state.rules, state.vars), cssFile, assets: [...state.assets] };
+  const code = [reactImport(state.usesId), `import './${cssFile}';`, ...images, '', ...(screen?.code ?? []), ...[...state.plans.values()].flatMap((plan) => plan.code)].join('\n');
+  return { name, code, css: cssText(state.rules, state.vars), cssFile, assets: [...state.assets], files: splitFiles(state, screen) };
+}
+
+/**
+ * 프로젝트에 넣을 파일들. 컴포넌트마다 components/이름.tsx·이름.css, 화면은 맨 위 이름.tsx·이름.css, 토큰과 글꼴 안내는 tokens.css 하나다.
+ * 각 TSX는 쓰는 컴포넌트를 먼저 import하고 자기 CSS를 마지막에 import한다. 번들러는 import 순서대로 CSS를 붙이므로
+ * 컴포넌트 규칙 뒤에 그것을 쓰는 쪽(인스턴스 위치 클래스)이 와서, 한 파일로 낼 때와 같은 순서가 된다.
+ */
+function splitFiles(state: ExportState, screen?: { owner: Owner; code: string[] }): ExportFile[] {
+  const tokens = tokenCss(state.vars);
+  const files: ExportFile[] = tokens.length ? [{ path: 'tokens.css', data: `${tokens.join('\n\n')}\n` }] : [];
+  const plans = [...state.plans.values()];
+  for (const plan of plans) files.push(...ownerFiles(state, plan.owner, plan.code, 'components/', '../', './'));
+  if (screen) files.push(...ownerFiles(state, screen.owner, screen.code, '', './', './components/'));
+  if (plans.length) files.push({ path: 'components/index.ts', data: `${plans.map((plan) => `export * from './${plan.name}';`).join('\n')}\n` });
+  return files;
+}
+
+/** 파일 하나(TSX와 CSS). folder는 파일이 놓일 폴더, up은 그 폴더에서 묶음 맨 위까지, components는 컴포넌트 폴더까지의 경로다. */
+function ownerFiles(state: ExportState, owner: Owner, code: string[], folder: string, up: string, components: string): ExportFile[] {
+  const rules = state.rules.filter((rule) => rule.owner === owner.name);
+  // CSS의 그림 url은 묶음 맨 위의 assets 폴더 기준으로 만들어져 있다. 하위 폴더 파일은 한 단계 위를 가리키게 고친다.
+  const css = rules.length ? cssText(rules, state.vars, { tokens: false }).replaceAll('url("./assets/', `url("${up}assets/`) : '';
+  const imports = [
+    reactImport(owner.usesId),
+    ...(state.vars.declarations.length || state.vars.families.size ? [`import '${up}tokens.css';`] : []),
+    ...[...owner.uses].map((used) => `import { ${used} } from '${components}${used}';`),
+    ...[...owner.images].map((assetId) => `import ${state.images.get(assetId)} from '${up}assets/${state.assetFile(assetId)}';`),
+    ...(css ? [`import './${owner.name}.css';`] : [])
+  ];
+  const files: ExportFile[] = [{ path: `${folder}${owner.name}.tsx`, data: `${[...imports, '', ...code].join('\n').trimEnd()}\n` }];
+  if (css) files.push({ path: `${folder}${owner.name}.css`, data: css });
+  return files;
 }
 
 /**

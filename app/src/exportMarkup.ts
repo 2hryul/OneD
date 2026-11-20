@@ -55,10 +55,19 @@ export function firstText(page: Page, node: DesignNode, hidden: ReadonlySet<stri
   return undefined;
 }
 
+/**
+ * 이름이 제목이 아니어도 제목처럼 보이는 글자(24px 이상, 굵게, 한 줄 80자 이하).
+ * 디자이너는 제목 레이어 이름을 글 내용 그대로 두는 경우가 많아, 이름만 보면 화면 제목이 모두 p가 된다.
+ */
+function looksLikeHeading(node: DesignNode): boolean {
+  const text = node.text ?? '';
+  return (node.fontSize ?? 18) >= 24 && (node.fontWeight ?? 400) >= 600 && text.length > 0 && text.length <= 80 && !text.includes('\n');
+}
+
 /** 텍스트 요소. 제목은 글자 크기로 단계를 정한다(32 이상 h1, 24 이상 h2, 나머지 h3). */
 export function textElement(node: DesignNode, phrasing: boolean): Element {
   if (phrasing) return { tag: 'span', attrs: [], reset: {}, phrasing: true };
-  if (hasRole(node, 'heading')) {
+  if (hasRole(node, 'heading') || looksLikeHeading(node)) {
     const size = node.fontSize ?? 18;
     return { tag: size >= 32 ? 'h1' : size >= 24 ? 'h2' : 'h3', attrs: [], reset: TEXT_RESET, phrasing: true };
   }
@@ -93,13 +102,14 @@ function imageOnly(node: DesignNode): Extract<DesignNode['fills'][number], { typ
 
 /**
  * 컨테이너(프레임·그룹·사각형·타원) 요소. 이름으로 역할을 고르고, 문장 요소만 와야 하는 자리면 span으로 둔다.
- * text.any는 안에 보이는 글자가 있는지(없는 버튼은 aria-label이 필요), text.input은 input 이름 컨테이너가 입력창으로 바꿀 글자를 찾았는지다.
+ * text.any는 안에 보이는 글자가 있는지(없는 버튼은 aria-label이 필요), text.input은 input 이름 컨테이너가 입력창으로 바꿀 글자를 찾았는지,
+ * text.label은 글자 없는 버튼의 이름(없으면 레이어 이름)이다.
  */
-export function boxElement(node: DesignNode, phrasing: boolean, text: { any: boolean; input: boolean }): Element {
+export function boxElement(node: DesignNode, phrasing: boolean, text: { any: boolean; input: boolean; label?: string }): Element {
   const image = imageOnly(node);
   if (image) return { tag: 'img', attrs: [`alt=${JSON.stringify(altText(node.name))}`], reset: { display: 'block', objectFit: FIT[image.fit] ?? 'cover' }, phrasing: true, assetId: image.assetId };
   if (phrasing) return { tag: 'span', attrs: [], reset: { display: 'block' }, phrasing: true };
-  if (hasRole(node, 'button')) return { tag: 'button', attrs: ['type="button"', ...(text.any ? [] : [`aria-label=${JSON.stringify(cleanName(node.name))}`])], reset: BUTTON_RESET, phrasing: true };
+  if (hasRole(node, 'button')) return { tag: 'button', attrs: ['type="button"', ...(text.any ? [] : [`aria-label=${JSON.stringify(text.label ?? cleanName(node.name))}`])], reset: BUTTON_RESET, phrasing: true };
   if (hasRole(node, 'input') && text.input) return { tag: 'label', attrs: [], reset: { display: 'block', cursor: 'text' }, phrasing: true };
   if (hasRole(node, 'link')) return { tag: 'a', attrs: ['href="#"'], reset: { display: 'block', ...LINK_RESET }, phrasing: true };
   if (node.type === 'frame' || node.type === 'group') {

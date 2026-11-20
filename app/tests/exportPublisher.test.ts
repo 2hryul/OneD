@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { transformSync } from 'esbuild';
 import { sampleDocument, solid, type DesignDocument, type FlexLayout, type NodeInput } from '../src/model';
 import { addShape, applyChanges, setToken, updateShape, type Transaction } from '../src/changes';
-import { combineAsVariants, createComponent } from '../src/components';
+import { combineAsVariants, createComponent, createInstance } from '../src/components';
 import { exportTsx, inspectCss, inspectSpacing } from '../src/export';
 import { toRem } from '../src/exportCss';
 import { crc32, createZip } from '../src/zip';
@@ -35,7 +35,9 @@ describe('CSS file output', () => {
     expect(cssFile).toBe('LandingPage.css');
     expect(code).toContain("import './LandingPage.css';");
     expect(code).not.toMatch(/style=\{\{/);
-    expect(code).toContain('className={["landing-page", props.className].filter(Boolean).join(\' \')} style={props.style}');
+    // 루트는 나머지 HTML 속성(onClick, aria-* 등)을 받고, 밖에서 준 className을 더한다.
+    expect(code).toContain('{...rest} className={["landing-page", className].filter(Boolean).join(\' \')} style={style}');
+    expect(code).toContain('export interface LandingPageProps extends Omit<HTMLAttributes<HTMLElement>, "children" | "dangerouslySetInnerHTML"');
     expect(code).toContain('className="landing-page__hero-panel"');
     expect(rule(css, 'landing-page__hero-panel')).toContain('left: 44px;');
     compiles(code);
@@ -64,8 +66,8 @@ describe('semantic tags', () => {
     const { code, css } = exportTsx(loginForm(), PAGE, 'form');
     expect(code).toContain('<h1 className="login-form__title">');
     expect(code).toContain('<label className="login-form__label">');
-    expect(code).toMatch(/<label className="login-form__input">\s*<input className="login-form__placeholder" type="text" placeholder=\{props\.placeholder\d+ \?\? "Enter email"\} \/>\s*<\/label>/);
-    expect(code).toContain('type="password" placeholder={props.placeholder');
+    expect(code).toMatch(/<label className="login-form__input">\s*<input className="login-form__placeholder" type="text" placeholder=\{placeholder\d+ \?\? "Enter email"\} \/>\s*<\/label>/);
+    expect(code).toContain('type="password" placeholder={placeholder');
     expect(code).toMatch(/<button className="login-form__button-primary" type="button">\s*<span className="login-form__button-label">/);
     expect(rule(css, 'login-form__title')).toContain('margin: 0;');
     expect(rule(css, 'login-form__button-primary')).toContain('border: 0;');
@@ -89,15 +91,16 @@ describe('semantic tags', () => {
     const doc = loginForm();
     const withComponent = apply(doc, createComponent(doc, PAGE, 'submit', 'cta'));
     const { code } = exportTsx(withComponent, PAGE, 'submit');
-    expect(code).toMatch(/<button className=\{\["button-primary", props\.className\]\.filter\(Boolean\)\.join\(' '\)\} style=\{props\.style\} type="button">/);
+    // 기본 속성(type) 뒤에 rest를 펼쳐, 쓰는 쪽이 type·aria-label·onClick 등을 줄 수 있다.
+    expect(code).toMatch(/<button type="button" \{\.\.\.rest\} className=\{\["button-primary", className\]\.filter\(Boolean\)\.join\(' '\)\} style=\{style\}>/);
     compiles(code);
   });
 
   it('exports an image-only rectangle as img with alt text', () => {
     const doc = add(sampleDocument(), { id: 'photo', type: 'rectangle', name: 'Hero photo', parentId: 'frame-1', x: 0, y: 0, width: 100, height: 80, fills: [{ type: 'image', assetId: 'abc123', fit: 'fill' }] });
     const { code, css } = exportTsx(doc, PAGE, 'frame-1');
-    expect(code).toContain("import image1 from './assets/abc123';");
-    expect(code).toContain('<img className="landing-page__hero-photo" src={image1} alt="Hero photo" />');
+    expect(code).toContain("import imageSrc1 from './assets/abc123';");
+    expect(code).toContain('<img className="landing-page__hero-photo" src={imageSrc1} alt="Hero photo" />');
     expect(rule(css, 'landing-page__hero-photo')).toContain('object-fit: cover;');
     expect(rule(css, 'landing-page__hero-photo')).not.toContain('background');
   });
@@ -120,7 +123,7 @@ describe('tokens as CSS variables', () => {
 });
 
 /** Form 세트: variant Type으로 입력 종류를 나눈 디자인 시스템 필드(제목 + 입력 상자 + 도움말). */
-function fieldSet(): DesignDocument {
+function fieldSet(variants: ReadonlyArray<readonly [string, string, string, number]> = [['txt', 'Type=txt, State=default', 'txt', 0], ['sel', 'Type=select, State=disabled', 'select', 400], ['area', 'Type=area, State=error', 'area', 800]]): DesignDocument {
   let doc: DesignDocument = { version: 5, name: 'Fields', components: {}, tokens: {}, pages: [{ id: PAGE, name: 'Page 1', children: [], objects: {} }] };
   const column: FlexLayout = { type: 'flex', direction: 'column', wrap: false, gap: 8, crossGap: 0, padding: [0, 0, 0, 0], justify: 'start', align: 'stretch' };
   const row: FlexLayout = { ...column, direction: 'row', padding: [12, 16, 12, 16], align: 'center' };
@@ -133,26 +136,24 @@ function fieldSet(): DesignDocument {
     doc = add(doc, { id: `${id}-hint`, type: 'text', name: 'Help Text', parentId: id, x, y: 76, width: 60, height: 14, fills: solid('#6b7280'), text: 'Help', fontSize: 12 });
     doc = apply(doc, createComponent(doc, PAGE, id, `c-${id}`));
   };
-  field('txt', 'Type=txt, State=default', 'txt', 0);
-  field('sel', 'Type=select, State=disabled', 'select', 400);
-  field('area', 'Type=area, State=error', 'area', 800);
-  return apply(doc, combineAsVariants(doc, PAGE, ['txt', 'sel', 'area'], 'form-set', 'Form'));
+  for (const [id, variant, box, x] of variants) field(id, variant, box, x);
+  return apply(doc, combineAsVariants(doc, PAGE, variants.map(([id]) => id), 'form-set', 'Form'));
 }
 
 describe('form fields and controls', () => {
   it('turns a Form variant set into label, input, textarea and select button tied by useId', () => {
     const { code, css } = exportTsx(fieldSet(), PAGE, 'form-set');
-    expect(code.startsWith("import { useId, type CSSProperties } from 'react';")).toBe(true);
+    expect(code.startsWith("import { useId, type HTMLAttributes } from 'react';")).toBe(true);
     expect(code.match(/const fieldId = useId\(\);/g)).toHaveLength(3);
     expect(code).toMatch(/<label className="form-type-txt-state-default__tit" htmlFor=\{fieldId\}>\s*<span className="form-type-txt-state-default__title">/);
     // 도움말 글자는 id를 받고, 입력은 aria-describedby로 그 글자를 가리킨다.
-    expect(code).toMatch(/<input className="form-type-txt-state-default__text" id=\{fieldId\} type="text" aria-describedby=\{`\$\{fieldId\}-hint`\} placeholder=\{props\.text \?\? "Enter"\} \/>/);
+    expect(code).toMatch(/<input className="form-type-txt-state-default__input" id=\{fieldId\} type="text" aria-describedby=\{`\$\{fieldId\}-hint`\} placeholder=\{text \?\? "Enter"\} \/>/);
     expect(code).toMatch(/<button className="form-type-select-state-disabled__select" type="button" id=\{fieldId\} aria-haspopup="listbox" disabled aria-describedby=\{`\$\{fieldId\}-hint`\}>/);
-    expect(code).toMatch(/<textarea className="form-type-area-state-error__text" id=\{fieldId\} aria-invalid="true" aria-describedby=/);
+    expect(code).toMatch(/<textarea className="form-type-area-state-error__input" id=\{fieldId\} aria-invalid="true" aria-describedby=/);
     expect(code).toContain('<p className="form-type-txt-state-default__help-text" id={`${fieldId}-hint`}>');
     // 입력창은 글자에 맞춘 24px 대신 상자의 남는 폭을 채운다.
-    expect(rule(css, 'form-type-txt-state-default__text')).toContain('flex: 1 1 0;');
-    expect(rule(css, 'form-type-txt-state-default__text')).toContain('min-width: 0;');
+    expect(rule(css, 'form-type-txt-state-default__input')).toContain('flex: 1 1 0;');
+    expect(rule(css, 'form-type-txt-state-default__input')).toContain('min-width: 0;');
     // 고정 폭 상자는 좁은 화면에서 부모보다 넓어지지 않는다.
     expect(rule(css, 'form-type-txt-state-default__txt')).toMatch(/width: 280px;[\s\S]*max-width: 100%;/);
     compiles(code);
@@ -169,9 +170,10 @@ describe('form fields and controls', () => {
     }
     doc = apply(doc, combineAsVariants(doc, PAGE, ['on', 'off'], 'radio-set', 'Radio'));
     const { code, css } = exportTsx(doc, PAGE, 'radio-set');
-    expect(code).toMatch(/<label className=\{\["radio-state-on"[^\n]*>\s*<input className="radio-state-on__control" type="radio" defaultChecked \/>/);
-    expect(code).toMatch(/<input className="radio-state-off__control" type="radio" \/>/);
-    expect(code).toContain('<span className="radio-state-on__dot" aria-hidden="true">');
+    // on·off는 구조가 같아 함수 하나로 합쳐지고, 선택 상태는 variant 조건식이 된다.
+    expect(code).toMatch(/<label data-state=\{state \?\? "on"\} \{\.\.\.rest\} className=\{\["radio"[^\n]*>\s*<input defaultChecked=\{\(state \?\? "on"\) === "on"\} className="radio__control" type="radio" \/>/);
+    expect(code.match(/^(export )?function /gm)).toHaveLength(1);
+    expect(code).toContain('<span className="radio__dot" aria-hidden="true">');
     expect(css).toMatch(/clip: rect\(0 0 0 0\);/);
     compiles(code);
   });
@@ -183,7 +185,7 @@ describe('form fields and controls', () => {
     doc = add(doc, { id: 'x', type: 'vector', name: 'Vector', parentId: 'icon', x: 612, y: 32, width: 16, height: 16, fills: [], vectorPaths: [{ d: 'M0 0L16 16', fill: 'none', stroke: '#000000', strokeWidth: 2 }] });
     doc = add(doc, { id: 'deco', type: 'rectangle', name: 'Rectangle 7', parentId: 'frame-1', x: 0, y: 0, width: 50, height: 50, fills: [{ type: 'image', assetId: 'bg1', fit: 'fill' }] });
     const { code } = exportTsx(doc, PAGE, 'frame-1');
-    expect(code).toMatch(/<button className="landing-page__close-button" type="button" aria-label="Close button">\s*<span className="landing-page__el-24-close" aria-hidden="true">\s*<svg/);
+    expect(code).toMatch(/<button className="landing-page__close-button" type="button" aria-label="Close button">\s*<span className="landing-page__close" aria-hidden="true">\s*<svg/);
     expect(code).toContain('alt=""');
     compiles(code);
   });
@@ -236,7 +238,7 @@ describe('typography and CSS reuse', () => {
     expect(rule(css, 'landing-page__rich')).toContain('font: var(--font-roboto-16-700);');
     expect(rule(css, 'landing-page__twin')).toContain('font: var(--font-roboto-16-700);');
     expect(rule(css, 'landing-page__rich')).not.toContain('font-size');
-    expect(code).toMatch(/\{props\.rich\d+ \?\? <>\{"Hello "\}<span className="landing-page__rich-run">\{"world"\}<\/span><\/>\}/);
+    expect(code).toMatch(/\{rich\d+ \?\? <>\{"Hello "\}<span className="landing-page__rich-run">\{"world"\}<\/span><\/>\}/);
     expect(rule(css, 'landing-page__rich-run')).toMatch(/font-weight: 400;\n {2}color: #ff0000;/);
     compiles(code);
   });
@@ -273,5 +275,91 @@ describe('handoff helpers', () => {
     expect(view.getUint32(view.getUint32(end + 16, true), true)).toBe(0x02014b50);
     expect(() => createZip([{ path: '../evil.txt', data: 'x' }])).toThrow(/폴더 밖/);
     expect(() => createZip([{ path: 'C:\\evil.txt', data: 'x' }])).toThrow(/폴더 밖/);
+  });
+});
+
+/**
+ * 카드 목록 화면. 루트·줄은 기본 이름(Frame …)이고, 제목 글자 레이어 이름은 글 내용 그대로다.
+ * Card 세트는 Tone=Primary·Secondary 두 variant(채우기 색만 다름)이고 같은 이름(Meta)의 글자가 둘 있다. 줄에는 Card 인스턴스 셋이 있다.
+ */
+function cardScreen(): DesignDocument {
+  let doc: DesignDocument = { version: 5, name: 'Cards', components: {}, tokens: {}, pages: [{ id: PAGE, name: 'Page 1', children: [], objects: {} }] };
+  const row: FlexLayout = { type: 'flex', direction: 'row', wrap: false, gap: 16, crossGap: 0, padding: [0, 0, 0, 0], justify: 'start', align: 'start' };
+  for (const [id, name, fill, x] of [['card-a', 'Tone=Primary', '#5369f8', 0], ['card-b', 'Tone=Secondary', '#ffffff', 300]] as const) {
+    doc = add(doc, { id, type: 'frame', name, parentId: null, x, y: 600, width: 200, height: 120, fills: solid(fill) });
+    doc = add(doc, { id: `${id}-title`, type: 'text', name: 'Title', parentId: id, x: x + 10, y: 610, width: 180, height: 24, fills: solid('#111827'), text: 'Card', fontSize: 16 });
+    doc = add(doc, { id: `${id}-meta`, type: 'text', name: 'Meta', parentId: id, x: x + 10, y: 640, width: 180, height: 20, fills: solid('#6b7280'), text: 'Author', fontSize: 12 });
+    doc = add(doc, { id: `${id}-meta2`, type: 'text', name: 'Meta', parentId: id, x: x + 10, y: 670, width: 180, height: 20, fills: solid('#6b7280'), text: 'Date', fontSize: 12 });
+    doc = apply(doc, createComponent(doc, PAGE, id, `c-${id}`));
+  }
+  doc = apply(doc, combineAsVariants(doc, PAGE, ['card-a', 'card-b'], 'card-set', 'Card'));
+  doc = add(doc, { id: 'screen', type: 'frame', name: 'Frame 1707482846', parentId: null, x: 0, y: 0, width: 1000, height: 400, fills: [] });
+  doc = add(doc, { id: 'headline', type: 'text', name: 'Build faster with cards', parentId: 'screen', x: 20, y: 20, width: 600, height: 48, fills: solid('#111827'), text: 'Build faster with cards', fontSize: 40, fontWeight: 700 });
+  doc = add(doc, { id: 'list', type: 'frame', name: 'Frame 12', parentId: 'screen', x: 20, y: 100, width: 960, height: 120, fills: [], layout: row });
+  ['c-card-a', 'c-card-b', 'c-card-a'].forEach((componentId, index) => {
+    doc = apply(doc, createInstance(doc, PAGE, componentId, { parentId: 'list', x: 20 + index * 216, y: 100 }, () => `item-${index}`).tx);
+  });
+  return doc;
+}
+
+describe('production-ready structure', () => {
+  it('names elements by role when layer names are tool defaults or sentences', () => {
+    const { name, code, css } = exportTsx(cardScreen(), PAGE, 'screen');
+    expect(name).toBe('Screen');
+    // 내용이 이름인 큰 굵은 글자는 이름에 title이 없어도 제목이다.
+    expect(code).toContain('<h1 className="screen__title">');
+    expect(code).toContain('className="screen__row"');
+    expect(css).not.toMatch(/frame-\d|build-faster/);
+  });
+
+  it('marks a row of the same component as a list', () => {
+    const { code } = exportTsx(cardScreen(), PAGE, 'screen');
+    expect(code).toMatch(/<div className="screen__row" role="list">/);
+    expect(code.match(/<Card [^\n]*role="listitem"/g)).toHaveLength(3);
+  });
+
+  it('merges variants with the same structure into one component styled by data attributes', () => {
+    const { code, css } = exportTsx(cardScreen(), PAGE, 'card-set');
+    expect(code.match(/^(export )?function /gm)).toHaveLength(1);
+    expect(code).toContain('data-tone={tone ?? "Primary"}');
+    expect(rule(css, 'card')).toContain('background-color: #5369f8;');
+    // 다른 variant는 다른 선언만, 우선순위를 올리지 않는 :where 아래에 낸다(인스턴스 위치 클래스가 계속 이긴다).
+    expect(css).toMatch(/\.card:where\(\[data-tone="Secondary"\]\) \{\n {2}background-color: #ffffff;\n\}/);
+    // 같은 이름의 글자 둘은 prop이 겹치지 않는다(같은 이름 속성이 두 번 나오면 JSX 오류).
+    expect(code).toMatch(/meta\?: string;\n {2}meta2\?: string;/);
+    expect(code).toContain('{meta ?? "Author"}');
+    expect(code).toContain('{meta2 ?? "Date"}');
+    compiles(code);
+  });
+
+  it('turns state differences into conditions when variants share a structure', () => {
+    const { code } = exportTsx(fieldSet([['txt', 'Type=txt, State=default', 'txt', 0], ['off', 'Type=txt, State=disabled', 'txt', 400]]), PAGE, 'form-set');
+    expect(code.match(/^(export )?function /gm)).toHaveLength(1);
+    expect(code).toContain('<input disabled={(state ?? "default") === "disabled"} className=');
+    compiles(code);
+  });
+
+  it('splits components into their own files with CSS imported after the components they use', () => {
+    const { files } = exportTsx(cardScreen(), PAGE, 'screen');
+    expect(files.map((file) => file.path).sort()).toEqual(['Screen.css', 'Screen.tsx', 'components/Card.css', 'components/Card.tsx', 'components/index.ts']);
+    const screen = files.find((file) => file.path === 'Screen.tsx')!.data;
+    expect(screen.indexOf("import { Card } from './components/Card';")).toBeLessThan(screen.indexOf("import './Screen.css';"));
+    expect(screen).not.toContain('export function Card');
+    expect(files.find((file) => file.path === 'components/Card.tsx')!.data).toContain("import './Card.css';");
+    expect(files.find((file) => file.path === 'components/index.ts')!.data).toBe("export * from './Card';\n");
+    for (const file of files.filter((item) => item.path.endsWith('.tsx'))) compiles(file.data);
+  });
+
+  it('puts tokens in one tokens.css every file imports and fixes asset paths in component folders', () => {
+    let doc = cardScreen();
+    doc = apply(doc, setToken(doc, { id: 't-brand', type: 'color', name: 'Brand', value: '#5369f8' }));
+    doc = apply(doc, updateShape(doc, PAGE, 'card-a', { fills: [{ type: 'image', assetId: 'bg1', fit: 'tile' }] }));
+    const { files } = exportTsx(doc, PAGE, 'screen');
+    const file = (path: string): string => files.find((item) => item.path === path)?.data ?? '';
+    expect(file('tokens.css')).toContain('--brand: #5369f8;');
+    expect(file('Screen.tsx')).toContain("import './tokens.css';");
+    expect(file('components/Card.tsx')).toContain("import '../tokens.css';");
+    expect(file('components/Card.css')).toContain('url("../assets/bg1")');
+    expect(file('components/Card.css')).not.toContain(':root');
   });
 });

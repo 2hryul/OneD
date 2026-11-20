@@ -92,8 +92,8 @@ describe('component properties', () => {
     frameDoc = applyChanges(frameDoc, addShape(frameDoc, PAGE, { id: 'screen', type: 'frame', name: 'Screen', parentId: null, x: 0, y: 200, width: 600, height: 200, fills: [] }).redo);
     const main = exportTsx(frameDoc, PAGE, 'card').code;
     expect(main).toMatch(/title\?: string;\n {2}showBadge\?: boolean;/);
-    expect(main).toContain('{props.title ?? "Hello"}');
-    expect(main).toMatch(/\{\(props\.showBadge \?\? true\) && \(\n\s*<div className="card__badge" \/>\n\s*\)\}/);
+    expect(main).toContain('{title ?? "Hello"}');
+    expect(main).toMatch(/\{\(showBadge \?\? true\) && \(\n\s*<div className="card__badge" \/>\n\s*\)\}/);
     transformSync(main, { loader: 'tsx', jsx: 'automatic' });
     const usage = exportTsx(doc, PAGE, instance).code;
     expect(usage).toContain('export function Card');

@@ -166,7 +166,9 @@ describe('component export', () => {
     expect(code).toContain('label?: string;');
     expect(code).toContain('export function Button(props: ButtonProps)');
     // variant 메인의 레이어 이름은 속성뿐이어도 세트 이름(Button)으로 button 요소가 된다.
-    expect(code.match(/<button className=\{\["button-/g)?.length).toBe(doc.pages[0]!.objects['button-set']!.children!.length);
+    // 구조가 같은 variant는 함수 하나로 합쳐지고 루트가 variant 값을 data 속성으로 갖는다.
+    expect(code.match(/^(export )?function /gm)).toHaveLength(1);
+    expect(code).toMatch(/<button [^\n]*data-variant=\{variant \?\? "[A-Za-z]+"\}[^\n]*\{\.\.\.rest\} className=\{\["button", className\]/);
     expect(() => transformSync(code, { loader: 'tsx', jsx: 'automatic' })).not.toThrow();
   });
 
