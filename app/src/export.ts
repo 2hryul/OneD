@@ -7,7 +7,7 @@ import { pathToD } from './path';
 import { inferFlow, type FlowMargin } from './flowInfer';
 import { cssText, declarations, kebab, tokenCss, tokenVars, typographyVar, uniqueIn, withTokens, type CssRule, type Style, type TokenVars } from './exportCss';
 import { nodesToSvg } from './svgExport';
-import { altText, boxElement, cleanName, controlState, fieldControl, fieldKind, firstText, hasRole, inputElement, isIcon, selectBox, textElement, VISUALLY_HIDDEN, type ControlState, type Element, type FieldKind } from './exportMarkup';
+import { altText, boxElement, cleanName, controlState, fieldControl, fieldKind, firstText, hasRole, headingElement, headingLevels, inputElement, isIcon, selectBox, textElement, VISUALLY_HIDDEN, type ControlState, type Element, type FieldKind, type HeadingLevel } from './exportMarkup';
 
 const JUSTIFY_CSS = { start: 'flex-start', center: 'center', end: 'flex-end', 'space-between': 'space-between' } as const;
 const ALIGN_CSS = { start: 'flex-start', center: 'center', end: 'flex-end', stretch: 'stretch' } as const;
@@ -60,7 +60,7 @@ function meaningfulName(node: Pick<DesignNode, 'name' | 'type' | 'text'>): strin
 /** 이름에 뜻이 없을 때 쓰는 역할 이름. 요소 종류·레이아웃 방향·그림 여부로 고른다(title, text, icon, row, stack 등). */
 function roleClass(node: DesignNode, element: Element): string {
   const tags: Record<string, string> = {
-    h1: 'title', h2: 'title', h3: 'title', p: 'text', a: 'link', button: 'button', img: 'image', svg: 'icon', input: 'input', textarea: 'input',
+    h1: 'title', h2: 'title', h3: 'title', h4: 'title', p: 'text', a: 'link', button: 'button', img: 'image', svg: 'icon', input: 'input', textarea: 'input',
     nav: 'nav', header: 'header', footer: 'footer', section: 'section'
   };
   if (element.tag === 'label') return node.type === 'text' ? 'label' : 'field';
@@ -320,12 +320,15 @@ export function findIllustrations(page: Page, rootId: string, hidden: ReadonlySe
     const node = page.objects[id];
     if (!node || hidden.has(id)) return { shapes: 0, blocked: false };
     let shapes = node.type === 'vector' || node.path || node.boolOp || node.type === 'ellipse' || node.type === 'rectangle' ? 1 : 0;
-    let blocked = node.type === 'text' || Boolean(node.componentId && !node.mainInstance) || node.fills.some((paint) => paint.type === 'image') || Boolean(node.interactions?.length);
+    // 그림·장식 말고 다른 역할(버튼, 제목 등)을 정한 도형은 그 요소로 내야 하므로 일러스트에 넣지 않는다.
+    let blocked = node.type === 'text' || Boolean(node.componentId && !node.mainInstance) || node.fills.some((paint) => paint.type === 'image') || Boolean(node.interactions?.length) || Boolean(node.role && node.role !== 'image' && node.role !== 'decoration');
     const kids = (node.children ?? []).map(visit);
     for (const kid of kids) { shapes += kid.shapes; blocked ||= kid.blocked; }
     // 회전한 묶음은 SVG 영역(회전 후 외곽)과 요소 상자가 달라 빼고, 뒤집기만 한 묶음은 상자가 같아 넣는다.
     const unrotated = Math.abs(node.transform[1]) < 1e-6 && Math.abs(node.transform[2]) < 1e-6;
-    if (id !== rootId && (node.type === 'frame' || node.type === 'group') && !node.layout && !blocked && unrotated && shapes >= ILLUSTRATION_MIN_SHAPES && Math.min(node.width, node.height) >= ILLUSTRATION_MIN_SIZE) {
+    // 역할을 그림으로 정한 묶음은 도형 수·크기와 상관없이 일러스트다.
+    const large = shapes >= ILLUSTRATION_MIN_SHAPES && Math.min(node.width, node.height) >= ILLUSTRATION_MIN_SIZE && !node.layout;
+    if (id !== rootId && (node.type === 'frame' || node.type === 'group') && !blocked && unrotated && (large || (node.role === 'image' && shapes > 0))) {
       for (const inner of walkPage(page, [id])) if (inner.id !== id) found.delete(inner.id);
       found.add(id);
     }
@@ -369,6 +372,8 @@ interface RenderContext {
   choice?: { type: 'radio' | 'checkbox'; state: ControlState };
   /** 이 렌더가 useId로 만든 fieldId를 쓰는지. */
   usesId: boolean;
+  /** 제목 글자(와 역할이 heading인 컨테이너)의 단계. 화면마다 h1은 하나다. */
+  headings: ReadonlyMap<string, HeadingLevel>;
   /** 불리언 컴포넌트 속성으로 보이기가 정해지는 도형의 prop 이름과 기본값. 조건부 렌더로 낸다. */
   visibleProp?: (node: DesignNode) => { prop: string; defaultValue: boolean } | undefined;
   /** 클래스 이름이 겹치지 않게 모으는 곳. variant를 합쳐 보는 시험 렌더는 따로 쓴다. */
@@ -444,7 +449,8 @@ function textOf(node: DesignNode, phrasing: boolean, context: RenderContext): El
   if (field && node.id === field.controlId) { context.usesId = true; return withDescription(fieldControl(field.kind, field.state), field); }
   if (field && node.id === field.labelId) { context.usesId = true; return { tag: 'label', attrs: ['htmlFor={fieldId}'], reset: { margin: 0 }, phrasing: true }; }
   if (context.inputs.has(node.id)) return inputElement(context.inputs.get(node.id)!);
-  return textElement(node, phrasing);
+  if (!phrasing && (node.role === 'input' || node.role === 'password')) return inputElement(node.role === 'password');
+  return textElement(node, phrasing, context.headings.get(node.id));
 }
 
 /**
@@ -464,7 +470,8 @@ function illustrationElement(node: DesignNode, context: RenderContext): Element 
     entry = { file, data: `${data}\n` };
     state.generated.set(node.id, entry);
   }
-  return { tag: 'img', attrs: [`alt=${JSON.stringify(altText(node.name))}`], reset: { display: 'block' }, phrasing: true, assetId: `${GENERATED}${entry.file}` };
+  const alt = node.role === 'decoration' ? '' : altText(node.name);
+  return { tag: 'img', attrs: [`alt=${JSON.stringify(alt)}`], reset: { display: 'block' }, phrasing: true, assetId: `${GENERATED}${entry.file}` };
 }
 
 /** 도형에 맞는 HTML 요소. input 이름 컨테이너를 만나면 그 안의 첫 텍스트를 입력창으로 예약한다. */
@@ -476,12 +483,14 @@ function elementOf(node: DesignNode, phrasing: boolean, context: RenderContext):
   if (field && node.id === field.labelId) { context.usesId = true; return { tag: 'label', attrs: ['htmlFor={fieldId}'], reset: { display: 'block' }, phrasing: true }; }
   if (field && node.id === field.boxId && field.kind.control === 'select') { context.usesId = true; return withDescription(selectBox(field.state), field); }
   if (node.id === context.rootId && context.choice) return { tag: 'label', attrs: [], reset: { display: 'block', cursor: 'pointer' }, phrasing: true };
+  const level = phrasing ? undefined : context.headings.get(node.id);
+  if (level) return headingElement(level);
   // variant 루트의 레이어 이름은 'Size=Icon, Color=Blue'처럼 속성뿐이다. 역할은 세트 이름으로 고르고, 아이콘 버튼 이름은 아이콘 이름으로 한다.
   const label = node.id === context.rootId && context.rootRoleName ? iconLabel(context, node) ?? cleanName(context.rootRoleName) : undefined;
   if (node.id === context.rootId && context.rootRoleName) node = { ...node, name: `${context.rootRoleName} ${node.name}` };
   // 아이콘만 든 버튼·링크는 버튼·링크가 먼저다(장식으로 숨기면 누를 수 있는 요소가 사라진다).
   const interactive = hasRole(node, 'button') || hasRole(node, 'link') || hasRole(node, 'input');
-  if (!interactive && isIcon(context.page, node)) return { tag: 'span', attrs: ['aria-hidden="true"'], reset: { display: 'block' }, phrasing: true };
+  if (!interactive && (!node.role || node.role === 'decoration') && isIcon(context.page, node)) return { tag: 'span', attrs: ['aria-hidden="true"'], reset: { display: 'block' }, phrasing: true };
   const input = !phrasing && hasRole(node, 'input') ? firstText(context.page, node, context.hidden) : undefined;
   const any = hasRole(node, 'button') && walkPage(context.page, [node.id]).some((item) => item.type === 'text' && !context.hidden.has(item.id));
   const element = boxElement(node, phrasing, { any, input: Boolean(input), label });
@@ -676,7 +685,8 @@ function renderNode(node: DesignNode, parent: DesignNode | null, depth: number, 
   const body = masking
     ? masking.runs.flatMap((run) => renderRun(run, node, depth + 1, context, childPhrasing))
     : (element.tag === 'img' ? [] : visibleChildren(context, node)).flatMap((child) => renderNode(child, node, depth + 1, context, childPhrasing, list));
-  const extra = root && context.choice ? [`${indent}  ${choiceInput(context)}`] : [];
+  const choice = root && context.choice ? context.choice : element.tag === 'label' && !phrasing ? checkboxRole(context, node) : undefined;
+  const extra = choice ? [`${indent}  ${choiceInput(context, choice)}`] : [];
   if (body.length === 0 && extra.length === 0) return [`${indent}<${open} />`];
   return [`${indent}<${open}>`, ...extra, ...body, `${indent}</${element.tag}>`];
 }
@@ -713,12 +723,18 @@ function renderRun(run: { mask?: DesignNode; ids: string[] }, parent: DesignNode
   return [`${indent}<${tag} className="${className}">`, ...nodes.flatMap((child) => renderNode(child, parent, depth + 1, context, phrasing)), `${indent}</${tag}>`];
 }
 
+/** 역할을 체크박스로 정한 도형의 실제 input. 안에 글자가 없으면 레이어 이름이 input의 이름이다. */
+function checkboxRole(context: RenderContext, node: DesignNode): (NonNullable<RenderContext['choice']> & { label?: string }) | undefined {
+  if (node.role !== 'checkbox') return undefined;
+  const text = walkPage(context.page, [node.id]).some((item) => item.type === 'text' && !context.hidden.has(item.id));
+  return { type: 'checkbox', state: controlState(undefined), label: text ? undefined : cleanName(node.name) };
+}
+
 /** radio·checkbox의 실제 input. 화면에서는 숨기고(디자인의 동그라미가 보임) 보조 기술과 키보드가 쓴다. */
-function choiceInput(context: RenderContext): string {
-  const choice = context.choice!;
+function choiceInput(context: RenderContext, choice: NonNullable<RenderContext['choice']> & { label?: string }): string {
   const className = uniqueIn(context.classes, `${context.block}__control`);
   context.rules.push({ selector: `.${className}`, style: VISUALLY_HIDDEN });
-  const attrs = [`type="${choice.type}"`, ...(choice.state.checked ? ['defaultChecked'] : []), ...(choice.state.disabled ? ['disabled'] : [])];
+  const attrs = [`type="${choice.type}"`, ...(choice.state.checked ? ['defaultChecked'] : []), ...(choice.state.disabled ? ['disabled'] : []), ...(choice.label ? [`aria-label=${JSON.stringify(choice.label)}`] : [])];
   return `<input className="${className}" ${attrs.join(' ')} />`;
 }
 
@@ -755,14 +771,15 @@ function spanRuns(node: DesignNode, className: string, context: RenderContext): 
 
 /** svg 여는 태그의 나머지 속성과 경로들. 편집 경로·불리언은 결과 경로 하나로, 가져온 벡터는 경로 목록으로 낸다. */
 function vectorBody(node: DesignNode): string {
+  const hide = node.role === 'image' ? `role="img" aria-label=${JSON.stringify(cleanName(node.name))}` : 'aria-hidden="true"';
   if (node.path) {
     const paint = pathPaint(node);
     const attrs = `fill=${JSON.stringify(paint.fill)}${paint.fillRule ? ` fillRule="${paint.fillRule}"` : ''}${paint.stroke ? ` stroke=${JSON.stringify(paint.stroke)} strokeWidth={${paint.strokeWidth}}` : ''}`;
-    return `viewBox="0 0 ${round(node.width)} ${round(node.height)}" overflow="visible" aria-hidden="true"><path d=${JSON.stringify(pathToD(node.path))} ${attrs} />`;
+    return `viewBox="0 0 ${round(node.width)} ${round(node.height)}" overflow="visible" ${hide}><path d=${JSON.stringify(pathToD(node.path))} ${attrs} />`;
   }
   const paths = (node.vectorPaths ?? []).map((path) => `<path d=${JSON.stringify(path.d)} fill=${JSON.stringify(path.fill)}${path.fillRule ? ` fillRule="${path.fillRule}"` : ''}${path.stroke ? ` stroke=${JSON.stringify(path.stroke)} strokeWidth={${path.strokeWidth ?? 1}}` : ''} />`).join('');
   const view = node.viewBox ?? { width: node.width, height: node.height };
-  return `viewBox="0 0 ${view.width} ${view.height}" preserveAspectRatio="none" aria-hidden="true">${paths}`;
+  return `viewBox="0 0 ${view.width} ${view.height}" preserveAspectRatio="none" ${hide}>${paths}`;
 }
 
 const BOOLEAN_VALUES = new Set(['true', 'false']);
@@ -850,10 +867,13 @@ function renderRoot(state: ExportState, page: Page, root: DesignNode, blockName:
   const hidden = hiddenIn(page, root.id, (node) => Boolean(options.visibleProp?.(node)));
   const variant = options.member?.variant;
   const classes = options.classes ?? state.classes;
+  const field = options.member ? planField(page, hidden, root, variant) : undefined;
+  // 화면의 가장 큰 제목이 h1이다. 컴포넌트는 화면 안에 놓이므로 h2부터 쓴다.
+  const headings = headingLevels(page, root.id, hidden, options.fluid ? 1 : 2, { rootName: options.member?.name, skip: new Set([field?.labelId, field?.controlId].filter((id): id is string => Boolean(id))) });
   const context: RenderContext = {
     state, page, hidden, rootId: root.id, textProp: options.textProp, visibleProp: options.visibleProp, block: options.block ?? uniqueIn(classes, kebab(blockName)), rules: [], inputs: new Map(),
-    rootRoleName: options.member?.name, component: Boolean(options.member), fluid: Boolean(options.fluid), usesId: false,
-    field: options.member ? planField(page, hidden, root, variant) : undefined,
+    rootRoleName: options.member?.name, component: Boolean(options.member), fluid: Boolean(options.fluid), usesId: false, headings,
+    field,
     choice: options.member ? planChoice(page, root, options.member.name, variant) : undefined,
     classes, owner: options.owner, rootAttrs: options.rootAttrs ?? [], toggled: new Set()
   };

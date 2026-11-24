@@ -1,5 +1,5 @@
 import { memo, useMemo, useState, type DragEvent, type ReactNode } from 'react';
-import { isContainer, type DesignNode, type NodeType, type Page } from './model';
+import { isContainer, LAYER_ROLES, type DesignNode, type LayerRole, type NodeType, type Page } from './model';
 import { rotationDegrees } from './geometry';
 import { layerRows } from './selection';
 import { parseNumberInput } from './numberInput';
@@ -164,12 +164,30 @@ interface PropertiesPanelProps {
   exportRow?: ReactNode;
 }
 
+const ROLE_LABELS: Record<LayerRole, string> = {
+  button: '버튼', link: '링크', input: '입력란', password: '비밀번호 입력란', checkbox: '체크박스', nav: '내비게이션', header: '헤더', footer: '푸터',
+  section: '섹션', heading: '제목', image: '그림', decoration: '장식(읽지 않음)'
+};
+
+/** 코드 내보내기 역할. 비우면 레이어 이름과 모양으로 짐작한다. */
+function RoleField({ node, onChange }: { node: DesignNode; onChange: (patch: Partial<DesignNode>) => void }): JSX.Element {
+  return (
+    <label className="field full"><span>웹 역할</span>
+      <select aria-label="웹 역할" value={node.role ?? ''} onChange={(event) => onChange({ role: (event.target.value || undefined) as LayerRole | undefined })}>
+        <option value="">자동(레이어 이름으로)</option>
+        {LAYER_ROLES.map((role) => <option key={role} value={role}>{ROLE_LABELS[role]}</option>)}
+      </select>
+    </label>
+  );
+}
+
 export function PropertiesPanel({ node, parent, header, tokens, path, exportRow, onChange, onRotate, onOpenCode, onDelete, onPickImage }: PropertiesPanelProps): JSX.Element {
   return (
     <div className="properties">
       <div className="selection-header"><span className="selection-icon">{nodeIcon(node)}</span><div><strong>{node.name}</strong><small>{node.sourceType ?? node.type}</small></div></div>
       {header}
       <label className="field full"><span>이름</span><input value={node.name} onChange={(event) => onChange({ name: event.target.value })} /></label>
+      <RoleField node={node} onChange={onChange} />
       <div className="section-title">레이아웃</div>
       <div className="fields-grid">
         {(['x', 'y', 'width', 'height'] as const).map((key) => <label className="field" key={key}><span>{key.toUpperCase()}</span><NumberField value={node[key]} min={key === 'width' || key === 'height' ? 1 : undefined} onCommit={(next) => onChange({ [key]: next })} /></label>)}

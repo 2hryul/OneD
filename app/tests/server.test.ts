@@ -92,6 +92,11 @@ describe('collaboration server', () => {
     expect((await b.next('reject')).clientSeq).toBe(8);
     b.send({ type: 'change', clientSeq: 9, redo: updateShape({ ...doc, pages: [{ ...doc.pages[0]!, objects: { ...doc.pages[0]!.objects, shared: { id: 'shared', type: 'rectangle', name: 'Shared', parentId: null, x: 0, y: 0, width: 10, height: 10, fills: [], transform: [1, 0, 0, 1, 0, 0] } }, children: [...doc.pages[0]!.children, 'shared'] }] }, 'page-1', 'shared', { name: 'Renamed' }).redo });
     expect((await a.next('changes')).revision).toBe(2);
+    // 웹 역할도 다른 참여자에게 간다. 모르는 역할은 거절한다.
+    b.send({ type: 'change', clientSeq: 10, redo: [{ type: 'modObj', pageId: 'page-1', id: 'shared', set: { role: 'carousel' } }] });
+    expect((await b.next('reject')).clientSeq).toBe(10);
+    b.send({ type: 'change', clientSeq: 11, redo: [{ type: 'modObj', pageId: 'page-1', id: 'shared', set: { role: 'button' } }] });
+    expect(await a.next('changes')).toMatchObject({ revision: 3, redo: [{ type: 'modObj', id: 'shared', set: { role: 'button' } }] });
 
     a.send({ type: 'comment-add', pageId: 'page-1', x: 40, y: 50, text: '  여기 간격 확인  ' });
     const comments = (await b.next('comments')).comments;
@@ -105,14 +110,14 @@ describe('collaboration server', () => {
 
     a.send({ type: 'version-save', label: 'Before cleanup' });
     const versions = (await b.next('versions')).versions;
-    expect(versions[0]).toMatchObject({ label: 'Before cleanup', revision: 2 });
+    expect(versions[0]).toMatchObject({ label: 'Before cleanup', revision: 3 });
     b.send({ type: 'version-restore', versionId: versions[0]!.id });
-    expect(await a.next('changes')).toMatchObject({ revision: 3, author: 'server' });
+    expect(await a.next('changes')).toMatchObject({ revision: 4, author: 'server' });
 
     a.ws.close(); b.ws.close();
     await new Promise((resolve) => setTimeout(resolve, 100));
     const saved = JSON.parse(readFileSync(join(root, 'data', 'files', `${fileId}.json`), 'utf8')) as { revision: number; comments: unknown[] };
-    expect(saved).toMatchObject({ revision: 3 });
+    expect(saved).toMatchObject({ revision: 4 });
     expect(saved.comments).toHaveLength(1);
   });
 

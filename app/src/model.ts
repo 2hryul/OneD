@@ -52,6 +52,10 @@ export interface Interaction { trigger: InteractionTrigger; delay?: number; acti
 export const TRIGGERS: readonly InteractionTrigger[] = ['click', 'mouse-enter', 'mouse-leave', 'after-delay'];
 export const OVERLAY_POSITIONS: readonly OverlayPosition[] = ['center', 'top-left', 'top-center', 'top-right', 'bottom-left', 'bottom-center', 'bottom-right'];
 
+/** 퍼블리셔가 레이어에 정하는 웹 역할. 정하면 코드 내보내기가 레이어 이름 대신 이 값으로 태그를 고른다. */
+export const LAYER_ROLES = ['button', 'link', 'input', 'password', 'checkbox', 'nav', 'header', 'footer', 'section', 'heading', 'image', 'decoration'] as const;
+export type LayerRole = (typeof LAYER_ROLES)[number];
+
 export type TextAlign = 'left' | 'center' | 'right' | 'justify';
 export type VerticalAlign = 'top' | 'middle' | 'bottom';
 
@@ -138,6 +142,8 @@ export interface DesignNode {
   interactions?: Interaction[];
   /** 화면(최상위 프레임)의 바로 아래 자식에서 true면 화면을 스크롤해도 제자리에 남는다(Figma Fix position when scrolling). */
   fixedScroll?: boolean;
+  /** 코드 내보내기의 역할. 없으면 레이어 이름과 모양으로 짐작한다. */
+  role?: LayerRole;
 }
 
 /** 변경 명령으로 바꿀 수 있는 속성. 정체성(id, type)과 계층(parentId, children)은 별도 변경으로만 바꾼다. */
@@ -211,6 +217,7 @@ export const SYNC_GROUPS = {
   /** 중첩 인스턴스 루트가 가진 컴포넌트 속성 값. 메인의 중첩 인스턴스에 정한 값이 인스턴스로 내려온다. */
   props: ['propValues'],
   prototype: ['interactions', 'fixedScroll'],
+  role: ['role'],
   geometry: ['x', 'y', 'width', 'height', 'transform']
 } as const satisfies Record<string, readonly string[]>;
 export type SyncGroup = keyof typeof SYNC_GROUPS;
@@ -464,6 +471,7 @@ function checkNodeFields(node: unknown, version: 1 | 2 | 3 | 4 | 5): asserts nod
   if (version === 5 && !isComponentFields(node)) throw new Error('Invalid component fields');
   if (!optional(node.path, (value) => isArrayOf(value, isSubPath)) || !optional(node.boolOp, (value) => ['union', 'subtract', 'intersect', 'exclude'].includes(value as string))) throw new Error('Invalid path');
   if (!optional(node.interactions, (value) => isArrayOf(value, isInteraction)) || !optional(node.fixedScroll, isBoolean)) throw new Error('Invalid interaction');
+  if (!optional(node.role, (value) => (LAYER_ROLES as readonly unknown[]).includes(value))) throw new Error('Invalid role');
   if (version >= 4 && (!optional(node.layout, (value) => isFlexLayout(value) || isGridLayout(value)) || !optional(node.item, isLayoutItem) || !optional(node.constraints, isConstraints))) throw new Error('Invalid layout');
 }
 
