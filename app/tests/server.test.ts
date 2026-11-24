@@ -148,9 +148,11 @@ describe('server helpers', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it('reads settings with Windows defaults and rejects bad values', () => {
-    const config = loadConfig({ APPDATA: 'C:\\Users\\u\\AppData\\Roaming', LOCALAPPDATA: 'C:\\Users\\u\\AppData\\Local' });
-    expect(config).toMatchObject({ host: '127.0.0.1', port: 8787, dataDir: 'C:\\Users\\u\\AppData\\Roaming\\CanvasStudio\\server', logDir: 'C:\\Users\\u\\AppData\\Local\\CanvasStudio\\logs' });
+  it('reads settings with APPDATA defaults and rejects bad values', () => {
+    // 경로는 실행 OS의 규칙으로 해석되므로, 그 OS에서 절대 경로인 기준을 쓴다(Linux CI에서 C:\는 상대 경로가 된다).
+    const base = process.platform === 'win32' ? 'C:\\Users\\u\\AppData' : '/home/u/AppData';
+    const config = loadConfig({ APPDATA: join(base, 'Roaming'), LOCALAPPDATA: join(base, 'Local') });
+    expect(config).toMatchObject({ host: '127.0.0.1', port: 8787, dataDir: join(base, 'Roaming', 'CanvasStudio', 'server'), logDir: join(base, 'Local', 'CanvasStudio', 'logs') });
     expect(() => loadConfig({ COLLAB_PORT: '70000' })).toThrow('COLLAB_PORT');
   });
 });
