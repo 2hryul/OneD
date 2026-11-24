@@ -214,7 +214,8 @@ describe('responsive layout', () => {
   it('lets the exported screen shrink and turns constraints into CSS', () => {
     let doc = sampleDocument();
     const box = (id: string, constraints: NonNullable<NodeInput['constraints']>): void => {
-      doc = add(doc, { id, type: 'rectangle', name: id, parentId: 'frame-1', x: 220, y: 135, width: 100, height: 40, fills: solid('#000000'), constraints });
+      // 흐름 밖(절대 위치) 도형의 제약 변환을 본다. 레이아웃 없는 프레임의 나머지 자식은 흐름 배치(inferFlow)로 나간다.
+      doc = add(doc, { id, type: 'rectangle', name: id, parentId: 'frame-1', x: 220, y: 135, width: 100, height: 40, fills: solid('#000000'), constraints, item: { absolute: true } });
     };
     box('pin-right', { h: 'right', v: 'bottom' });
     box('stretch', { h: 'left-right', v: 'top' });
@@ -240,7 +241,7 @@ describe('responsive layout', () => {
     expect(rule(css, 'landing-page__columns')).toContain('height: 100px;');
     expect(css).toMatch(/@media \(max-width: 767px\) \{\n {2}\.landing-page__columns \{\n {4}height: auto;\n {4}min-height: 100px;\n {4}flex-direction: column;\n {4}align-items: stretch;\n {4}column-gap: 0;\n {4}row-gap: 24px;\n {2}\}/);
     // 좁은 가로 묶음(칩·버튼 줄)은 쌓지 않고 높이만 푼다.
-    expect(css).toMatch(/ {2}\.landing-page__chips \{\n {4}height: auto;\n {4}min-height: 40px;\n {2}\}\n\}\n$/);
+    expect(css).toMatch(/@media \(max-width: 767px\) \{[\s\S]*? {2}\.landing-page__chips \{\n {4}height: auto;\n {4}min-height: 40px;\n {2}\}/);
     // 글자 상자는 처음부터 최소 높이라 줄이 늘면 함께 늘어난다.
     expect(rule(css, 'landing-page__heading')).toContain('min-height: 72px;');
   });

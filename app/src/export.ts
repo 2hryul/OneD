@@ -4,6 +4,7 @@ import { hasMask, maskImageUrl, maskRuns } from './mask';
 import { applyPoint, center, invert, isFlipped, linearPart, multiply, rotationDegrees, worldMatrix } from './geometry';
 import { adjustedImageFill, fontStack, pathPaint, paintsToBackground, strokeAndEffectCss, textCss, textRuns, withAlpha } from './styleCss';
 import { pathToD } from './path';
+import { inferFlow, type FlowMargin } from './flowInfer';
 import { cssText, declarations, kebab, tokenCss, tokenVars, typographyVar, uniqueIn, withTokens, type CssRule, type Style, type TokenVars } from './exportCss';
 import { boxElement, cleanName, controlState, fieldControl, fieldKind, firstText, hasRole, inputElement, isIcon, selectBox, textElement, VISUALLY_HIDDEN, type ControlState, type Element, type FieldKind } from './exportMarkup';
 
@@ -78,7 +79,7 @@ const RESERVED = new Set(['break', 'case', 'catch', 'class', 'const', 'continue'
 const LOCAL_NAMES = ['style', 'className', 'rest', 'props', 'fieldId', 'key', 'ref', 'children'];
 
 /** 스타일을 만들 때 도형 밖에서 알아야 하는 것. fluid는 화면 루트, control은 입력 요소(input·textarea), asset은 그림 파일 이름(파일이 없으면 null)이다. */
-interface StyleHints { fluid?: boolean; control?: boolean; asset: (assetId: string) => string | null }
+interface StyleHints { fluid?: boolean; control?: boolean; asset: (assetId: string) => string | null; flowParent?: boolean }
 
 /** CSS url()에 쓸 그림 경로. 파일이 없으면 null이라 paintsToBackground가 빈 자리(체크무늬)를 그린다. */
 const assetUrl = (asset: StyleHints['asset']) => (assetId: string): string | null => { const file = asset(assetId); return file === null ? null : `./assets/${file}`; };
@@ -95,21 +96,22 @@ function placement(node: DesignNode, parent: DesignNode | null, hints: Partial<S
       : { position: 'relative', width: node.width, height: node.height, boxSizing: 'border-box' };
   }
   const inFlow = Boolean(parent.layout) && !node.item?.absolute;
-  return inFlow ? flowPlacement(node, parent, Boolean(hints.control)) : absolutePlacement(node, parent);
+  return inFlow ? flowPlacement(node, parent, Boolean(hints.control)) : absolutePlacement(node, parent, Boolean(hints.flowParent));
 }
 
 /**
  * 부모 기준 절대 위치. 부모가 프레임이고 서로 회전이 없으면 제약을 CSS로 옮긴다:
  * right·bottom은 반대쪽 거리, center는 50% 기준 거리, left-right·top-bottom은 양쪽 거리(크기는 따라 늘어남), scale은 비율.
  */
-function absolutePlacement(node: DesignNode, parent: DesignNode): Style {
+function absolutePlacement(node: DesignNode, parent: DesignNode, flowParent = false): Style {
   // 부모의 지역 좌표로 옮긴다. 부모 요소가 자기 회전·반전을 CSS로 다시 적용하므로, 페이지 좌표 차이를 그대로 쓰면 두 번 적용된다.
   const local = applyPoint(invert(worldMatrix(parent)), center(node));
   const left = round(local.x - node.width / 2);
   const top = round(local.y - node.height / 2);
   const relative = multiply(invert(linearPart(parent.transform)), linearPart(node.transform));
   const straight = Math.abs(relative[1]) < 1e-6 && Math.abs(relative[2]) < 1e-6;
-  const constraints = parent.type === 'frame' && straight ? node.constraints : undefined;
+  // 흐름 배치로 바꾼 그룹도 프레임처럼 크기가 바뀌므로 제약을 따른다.
+  const constraints = (parent.type === 'frame' || flowParent) && straight ? node.constraints : undefined;
   const sides: Style = {
     ...axisPlacement(constraints?.h ?? 'left', left, node.width, parent.width, ['left', 'right', 'width']),
     ...axisPlacement(constraints?.v ?? 'top', top, node.height, parent.height, ['top', 'bottom', 'height'])
@@ -285,10 +287,12 @@ interface Rendered { body: string[]; usesId: boolean; rules: CssRule[]; rootTag?
 /**
  * 파일 하나를 만드는 동안의 상태. rules는 CSS 규칙을 쓸 순서대로 모은다(컴포넌트 규칙이 그것을 쓰는 쪽보다 앞).
  * images는 img로 낸 그림 id → import 변수 이름, assets는 코드·CSS가 쓴 모든 그림 id, missing은 파일이 없어 빈 자리로 낸 그림 id다.
+ * flow는 화면을 흐름 배치로 바꾼 결과(inferFlow)의 요소별 margin과 레이아웃을 새로 붙인 컨테이너다. 컴포넌트 내보내기에는 없다.
  */
 interface ExportState {
   doc: DesignDocument; plans: Map<string, ComponentPlan>; names: Set<string>; classes: Set<string>; rules: CssRule[]; vars: TokenVars;
   images: Map<string, string>; assets: Set<string>; missing: Set<string>; assetFile: (assetId: string) => string; hasAsset: (assetId: string) => boolean; usesId: boolean;
+  flow: { margins: ReadonlyMap<string, FlowMargin>; inferred: ReadonlySet<string>; zIndex: ReadonlyMap<string, number>; gutters: ReadonlySet<string> };
 }
 
 /**
@@ -444,13 +448,36 @@ const NARROW_MEDIA = '(max-width: 767px)';
  * 좁은 화면 규칙. 디자인 폭에서는 적용되지 않는다.
  * - 화면 출력에서 넓은(600px 이상) 가로 오토 레이아웃은 세로로 쌓는다(사이드바 + 본문 같은 단 구성). 줄바꿈 레이아웃과 컴포넌트 안쪽은 그대로 둔다.
  * - 고정 높이 오토 레이아웃 상자는 높이를 풀어(최소값으로) 줄이 늘어난 글자를 담는다.
+ * - 흐름 배치로 바꾼 컨테이너(inferFlow)는 좌우 여백을 16px까지 줄이고, 600px보다 좁은 가로 줄은 줄바꿈한다.
+ *   디자인 폭의 들여쓰기(왼쪽 margin)는 지운다. 위쪽 간격은 그대로 둔다.
  */
 function stackOnNarrow(node: DesignNode, style: Style, context: RenderContext): Style | null {
+  const { flow } = context.state;
+  const narrow: Style = {};
+  const margin = flow.margins.get(node.id);
+  if (margin && ((margin.axis === 'row' && margin.main) || (margin.axis === 'column' && margin.cross))) narrow.marginLeft = 0;
+  if (margin?.axis === 'column' && margin.cross && typeof style.maxWidth === 'string') narrow.maxWidth = '100%';
+  // 흐름 안의 고정 높이 요소(글자 등)는 좁은 화면에서 높이를 풀어 늘어난 줄이 아래 요소를 밀게 한다.
+  if (node.parentId && flow.inferred.has(node.parentId) && !node.item?.absolute && typeof style.height === 'number' && (node.type === 'text' || node.layout)) Object.assign(narrow, { height: 'auto', minHeight: style.height });
   const layout = node.layout;
-  if (!layout) return null;
-  const narrow: Style = typeof style.height === 'number' ? { height: 'auto', minHeight: style.height } : {};
+  if (!layout) return Object.keys(narrow).length ? narrow : null;
+  if (typeof style.height === 'number') Object.assign(narrow, { height: 'auto', minHeight: style.height });
   if (!context.component && layout.type === 'flex' && layout.direction === 'row' && !layout.wrap && node.width >= 600) {
     Object.assign(narrow, { flexDirection: 'column', alignItems: 'stretch', columnGap: 0, rowGap: layout.justify === 'space-between' ? 0 : layout.gap });
+  } else if (flow.inferred.has(node.id) && layout.type === 'flex' && layout.direction === 'row') {
+    // 줄바꿈된 줄 사이 간격은 가로 간격(디자인에서 수백 px일 수 있다)이 아니라 16px 이하로 둔다.
+    Object.assign(narrow, { flexWrap: 'wrap', rowGap: Math.min(layout.gap, 16) });
+  }
+  // 흐름 배치 안의 상자는 좌우 여백을 16px까지 줄인다. 여백만큼은 줄어들 수 없어 화면 밖으로 나가기 때문이다.
+  // 좌우 여백이 같던 오토 레이아웃 상자(가운데 글자 버튼 등)는 내용을 가운데 정렬로 바꿔 모양을 지킨다.
+  const inFlowContext = flow.inferred.has(node.id) || Boolean(node.parentId && flow.inferred.has(node.parentId));
+  if (inFlowContext) {
+    const [top, right, bottom, left] = layout.padding;
+    if (flow.gutters.has(node.id)) narrow.padding = `${top}px 16px ${bottom}px 16px`;
+    else if (left > 16 || right > 16) {
+      narrow.padding = `${top}px ${Math.min(right, 16)}px ${bottom}px ${Math.min(left, 16)}px`;
+      if (!flow.inferred.has(node.id) && layout.type === 'flex' && layout.direction === 'row' && left === right && layout.justify === 'start') narrow.justifyContent = 'center';
+    }
   }
   return Object.keys(narrow).length ? narrow : null;
 }
@@ -459,12 +486,29 @@ function stackOnNarrow(node: DesignNode, style: Style, context: RenderContext): 
 function addRule(context: RenderContext, className: string, node: DesignNode, parent: DesignNode | null, element: Element, extra: Style = {}): void {
   const { state } = context;
   const root = node.id === context.rootId;
-  const hints: StyleHints = { fluid: root && context.fluid, control: element.tag === 'input' || element.tag === 'textarea', asset: (id) => {
+  const hints: StyleHints = { fluid: root && context.fluid, control: element.tag === 'input' || element.tag === 'textarea', flowParent: Boolean(parent && state.flow.inferred.has(parent.id)), asset: (id) => {
     if (!state.hasAsset(id)) { state.missing.add(id); return null; }
     state.assets.add(id);
     return state.assetFile(id);
   } };
   const style: Style = { ...element.reset, ...styleFor(node, parent, hints), ...extra };
+  // 흐름 배치(inferFlow)에서 gap 하나로 못 맞춘 간격과 교차축 들여쓰기. 디자인 폭에서 원래 자리와 같게 한다.
+  // 가로 margin은 부모 안쪽 폭에 대한 %로 낸다. 디자인 폭에서는 px과 같고, 태블릿 폭처럼 화면이 줄면 함께 줄어 요소를 밀어내지 않는다.
+  const flowParent = parent && state.flow.inferred.has(parent.id) && parent.layout?.type === 'flex' ? parent : null;
+  const margin = state.flow.margins.get(node.id);
+  if (margin) {
+    const [mainKey, crossKey] = margin.axis === 'row' ? ['marginLeft', 'marginTop'] : ['marginTop', 'marginLeft'];
+    const inner = flowParent ? flowParent.width - flowParent.layout!.padding[1] - flowParent.layout!.padding[3] : 0;
+    const horizontal = (value: number): string | number => (inner > 0 ? `${Math.round((value / inner) * 10000) / 100}%` : value);
+    if (margin.main) style[mainKey] = mainKey === 'marginLeft' ? horizontal(margin.main) : margin.main;
+    if (margin.cross) style[crossKey] = crossKey === 'marginLeft' ? horizontal(margin.cross) : margin.cross;
+    // 열 안에서 왼쪽으로 들여 쓴 요소는 남은 폭(100% - 들여쓰기)보다 넓어지지 않게 한다. 디자인 폭에서는 꼭 맞는다.
+    if (margin.axis === 'column' && typeof style.marginLeft === 'string' && typeof style.width === 'number') style.maxWidth = `${Math.round((100 - parseFloat(style.marginLeft)) * 100) / 100}%`;
+  }
+  // 흐름 배치로 바꾼 가로 줄의 요소는 줄어들 수 있다(디자인 폭에서는 꼭 맞아 줄지 않는다). 그래야 태블릿 폭에서 줄 밖으로 나가지 않는다.
+  if (flowParent && flowParent.layout?.type === 'flex' && flowParent.layout.direction === 'row' && !node.item?.absolute) Object.assign(style, { flexShrink: 1, minWidth: 0 });
+  const zIndex = state.flow.zIndex.get(node.id);
+  if (zIndex !== undefined) style.zIndex = String(zIndex);
   if (element.tag === 'img') delete style.background;
   // 색 보정한 그림은 ::before 겹에만 filter를 건다. isolation으로 쌓임 맥락을 만들어 z-index -1 겹이 요소 배경 위·자식 아래에 깔리게 한다.
   const adjusted = adjustedImageFill(node);
@@ -474,6 +518,14 @@ function addRule(context: RenderContext, className: string, node: DesignNode, pa
   if (adjusted) {
     const background = paintsToBackground([adjusted.paint], node.width, node.height, assetUrl(hints.asset))!;
     context.rules.push({ selector: `.${className}::before`, style: { content: '""', position: 'absolute', inset: '0', zIndex: '-1', borderRadius: 'inherit', background, filter: adjusted.filter, pointerEvents: 'none' } });
+  }
+  // 흐름 배치 안의 요소는 디자인 폭보다 좁아지면(태블릿 폭) 높이를 최소값으로 풀어 늘어난 글 줄이 겹치지 않게 하고, 그림은 비율을 지킨다.
+  // 디자인 폭에서는 적용되지 않아 원래 자리 그대로다.
+  const designWidth = context.page.objects[context.rootId]?.width ?? 0;
+  // 디자인 폭이 768px 이하면 좁은 화면 규칙이 같은 구간을 맡으므로 따로 내지 않는다.
+  if (!context.component && parent && state.flow.inferred.has(parent.id) && !node.item?.absolute && typeof final.height === 'number' && designWidth > 768) {
+    const relaxed: Style = element.tag === 'img' ? { height: 'auto', aspectRatio: `${round(node.width)} / ${round(node.height)}` } : node.type === 'text' || node.layout ? { height: 'auto', minHeight: final.height } : {};
+    if (Object.keys(relaxed).length) context.rules.push({ selector: `.${className}`, style: relaxed, media: `(max-width: ${Math.ceil(designWidth) - 1}px)` });
   }
   const stacked = stackOnNarrow(node, final, context);
   if (stacked) context.rules.push({ selector: `.${className}`, style: stacked, media: NARROW_MEDIA });
@@ -1014,7 +1066,7 @@ export function exportTsx(doc: DesignDocument, pageId: string, selectedId: strin
   const page = doc.pages.find((item) => item.id === pageId);
   const root = page?.objects[selectedId];
   if (!page || !root) throw new Error('Select a node to export');
-  const state: ExportState = { doc, plans: new Map(), names: new Set(), classes: new Set(), rules: [], vars: tokenVars(doc), images: new Map(), assets: new Set(), missing: new Set(), assetFile: options.assetFile ?? ((id) => id), hasAsset: options.hasAsset ?? (() => true), usesId: false };
+  const state: ExportState = { doc, plans: new Map(), names: new Set(), classes: new Set(), rules: [], vars: tokenVars(doc), images: new Map(), assets: new Set(), missing: new Set(), assetFile: options.assetFile ?? ((id) => id), hasAsset: options.hasAsset ?? (() => true), usesId: false, flow: { margins: new Map(), inferred: new Set(), zIndex: new Map(), gutters: new Set() } };
   const componentId = root.componentId ?? (root.componentSet ? Object.values(doc.components).find((item) => item.setId === root.id)?.id : undefined);
   if (componentId && (root.mainInstance || root.componentSet)) {
     const plan = ensurePlan(state, componentId);
@@ -1026,7 +1078,10 @@ export function exportTsx(doc: DesignDocument, pageId: string, selectedId: strin
   const hidden = hiddenIn(page, selectedId);
   const texts = walkPage(page, [selectedId]).filter((node) => node.type === 'text' && !hidden.has(node.id) && !(node.id !== selectedId && insideInstanceBelow(page, node, selectedId)));
   const props = new Map(texts.map((node, index) => [node.id, screenPropName(node, index)]));
-  const rendered = commit(state, owner, renderRoot(state, page, root, name, { textProp: (node) => props.get(node.id), fluid: true, owner }));
+  // 오토 레이아웃이 없는 프레임·그룹은 흐름 배치로 바꿔 낸다(좁은 화면에서 줄바꿈·세로 쌓기가 되도록). 인스턴스 안은 컴포넌트가 따로 낸다.
+  const flow = inferFlow(page, selectedId, hidden, (node) => node.id !== selectedId && Boolean(node.componentId));
+  state.flow = flow;
+  const rendered = commit(state, owner, renderRoot(state, flow.page, flow.page.objects[selectedId]!, name, { textProp: (node) => props.get(node.id), fluid: true, owner }));
   const names = texts.map((node) => props.get(node.id)!);
   const own = [...propsInterface(name, names, names.map((prop) => `  ${prop}?: string;`)), ...functionLines(`export function ${name}(props: ${name}Props)`, names, rendered)];
   return result(state, name, { owner, code: own });
