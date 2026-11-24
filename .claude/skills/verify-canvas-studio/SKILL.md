@@ -26,7 +26,7 @@ cd .claude/skills/verify-canvas-studio/harness && npm ci
 node .claude/skills/verify-canvas-studio/harness/run.mjs <journey>
 ```
 
-- `journey`: `json-open`, `reload-persist`, `code-zip`, `fig-import`, `all`(`fig-import`는 `VERIFY_FIG_FILE`이 있을 때만 포함).
+- `journey`: `json-open`, `reload-persist`, `code-zip`, `fig-import`, `export-quality`, `all`(`fig-import`는 `VERIFY_FIG_FILE`이 있을 때만 포함하고, `export-quality`는 `test/`의 샘플이 필요하고 30초쯤 걸려 넣지 않는다).
 - 서버: `app/node_modules/vite/bin/vite.js --host 127.0.0.1 --port 5179 --strictPort`를 직접 띄운다. 사용자가 쓰는 5173과 겹치지 않는다. 다른 포트가 필요하면 `--port <n>`.
 - **준비 기준:** HTML 제목이 `Canvas Studio`이고 `/src/main.tsx`가 200으로 변환되어 나온 뒤, 페이지에서 `문서 이름` 입력란이 보일 때. 30초 안에 안 되면 vite 로그와 함께 실패한다.
 - 저장 상태: 여정마다 **새 브라우저 컨텍스트**(빈 localStorage·IndexedDB)라 첫 화면은 항상 앱의 샘플 문서(`Landing page` 프레임, 글자 `Design starts here`)다. 사용자의 브라우저 프로필과 작업을 건드리지 않는다.
@@ -104,6 +104,8 @@ node .claude/skills/verify-canvas-studio/harness/cleanup.mjs
 | `harness/doctor.mjs` | `node harness/doctor.mjs [--port n]` | 읽기 전용 점검 |
 | `harness/cleanup.mjs` | `node harness/cleanup.mjs` | 남은 서버만 끄고 증거 목록 출력 |
 | `harness/lib.mjs` | (모듈) | 경로, 서버 시작·종료, 브라우저 찾기, zip 목록 읽기 |
+| `harness/export-quality.mjs` | `node harness/run.mjs export-quality` (`VERIFY_FIG_DIR`, `VERIFY_FIG_ONLY`) | `test/`의 프레임마다 zip 받기 → 빌드 → 폭별 측정 → 목표 판정 |
+| `harness/quality-metrics.mjs` | `node --test harness/export-quality.test.mjs` | zip 풀기, 픽셀 차이, 목표 표와 판정(순수 함수) |
 | `fixtures/verify-doc.json` | (데이터) | 앱의 JSON 저장으로 만든 version 5 문서. 이름 `VERIFY 문서`, 페이지 `Verify page`, 레이어 `VERIFY Card`, 글자 `Verify text 검증` |
 
 모델·문서 형식이 바뀌어 고정 문서가 열리지 않으면, `reload-persist`가 내려받은 JSON을 바탕으로 위 네 값만 바꿔 다시 만든다.

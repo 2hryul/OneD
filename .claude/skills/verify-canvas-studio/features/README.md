@@ -32,3 +32,4 @@ Canvas Studio 웹 편집기의 사용자 동작을 검증하는 기준 문서다
 - [저장 뒤 새로 고침](./reload-persist.md): 이름을 바꾸고 JSON 저장 → 새로 고침해도 남고, 내려받은 JSON을 다시 열 수 있다. 여정 `reload-persist`.
 - [React 코드 zip 내보내기](./code-zip.md): 프레임을 골라 코드 창에서 zip을 받으면 TSX·CSS가 들어 있다. 여정 `code-zip`.
 - [.fig 가져오기](./fig-import.md): Figma 로컬 복사본에서 프레임을 골라 가져온다. 저장소 밖의 `.fig`가 필요하다. 여정 `fig-import`.
+- [내보낸 코드 품질 측정](./export-quality.md): `test/`의 프레임마다 앱에서 zip을 받아 빌드하고 반응형·태그·픽셀 차이를 재서 목표와 비교한다. 여정 `export-quality`(`all`에는 들지 않는다).
