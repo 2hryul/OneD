@@ -1,4 +1,4 @@
-import type { DesignNode, Page } from './model';
+import type { DesignNode, LayerRole, Page } from './model';
 import type { Style } from './exportCss';
 import { adjustedImageFill } from './styleCss';
 
@@ -26,11 +26,18 @@ const ROLES = {
 } as const;
 type Role = keyof typeof ROLES;
 
+/** 퍼블리셔가 정한 역할이 뜻하는 이름 역할. 정한 역할이 있으면 이름은 보지 않는다(비밀번호는 입력이기도 하다). */
+const EXPLICIT: Record<LayerRole, readonly Role[]> = {
+  button: ['button'], link: ['link'], input: ['input'], password: ['input', 'password'], checkbox: ['checkbox'],
+  nav: ['nav'], header: ['header'], footer: ['footer'], section: ['section'], heading: ['heading'], image: [], decoration: []
+};
+
 function nameWords(name: string): Set<string> {
   return new Set(name.replace(/([a-z0-9])([A-Z])/g, '$1 $2').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean));
 }
 
-export function hasRole(node: Pick<DesignNode, 'name'>, role: Role): boolean {
+export function hasRole(node: Pick<DesignNode, 'name'> & Partial<Pick<DesignNode, 'role'>>, role: Role): boolean {
+  if (node.role) return EXPLICIT[node.role].includes(role);
   const words = nameWords(node.name);
   const lower = node.name.toLowerCase();
   return ROLES[role].words.some((word) => words.has(word)) || ROLES[role].ko.some((word) => node.name.includes(word)) || (role === 'input' && lower.includes('text field'));
@@ -65,13 +72,56 @@ function looksLikeHeading(node: DesignNode): boolean {
   return (node.fontSize ?? 18) >= 24 && (node.fontWeight ?? 400) >= 600 && text.length > 0 && text.length <= 80 && !text.includes('\n');
 }
 
-/** 텍스트 요소. 제목은 글자 크기로 단계를 정한다(32 이상 h1, 24 이상 h2, 나머지 h3). */
-export function textElement(node: DesignNode, phrasing: boolean): Element {
+/** 제목 글자인지. 역할을 정했으면 역할만 본다. */
+function isHeadingText(node: DesignNode): boolean {
+  return node.role ? node.role === 'heading' : hasRole(node, 'heading') || looksLikeHeading(node);
+}
+
+export type HeadingLevel = 1 | 2 | 3 | 4;
+
+/**
+ * 렌더 범위 안 제목의 단계. 가장 큰 제목 하나가 top(화면은 1, 컴포넌트는 2)이고, 나머지는 글자 크기 순서로 한 단계씩 내려가 h4에서 멈춘다.
+ * 버튼·링크·입력 안의 글자(문장 요소가 됨)와 아래 인스턴스(컴포넌트가 따로 냄), skip(폼 필드 글자)은 세지 않는다.
+ * 역할이 heading인 컨테이너는 안의 가장 큰 글자 크기로 세고, 안의 글자는 따로 세지 않는다.
+ */
+export function headingLevels(page: Page, rootId: string, hidden: ReadonlySet<string>, top: 1 | 2, options: { rootName?: string; skip?: ReadonlySet<string> } = {}): Map<string, HeadingLevel> {
+  const found: Array<{ id: string; size: number }> = [];
+  const largest = (node: DesignNode): number => Math.max(0, ...(node.type === 'text' ? [node.fontSize ?? 18] : []), ...(node.children ?? []).map((id) => page.objects[id]).filter((child): child is DesignNode => Boolean(child && !hidden.has(child.id))).map(largest));
+  const visit = (id: string): void => {
+    let node = page.objects[id];
+    if (!node || hidden.has(id) || options.skip?.has(id)) return;
+    if (id !== rootId && node.componentId && !node.mainInstance) return;
+    if (id === rootId && options.rootName) node = { ...node, name: `${options.rootName} ${node.name}` };
+    if (hasRole(node, 'button') || hasRole(node, 'link') || hasRole(node, 'input') || node.role === 'checkbox' || node.role === 'decoration') return;
+    if (node.type === 'text') { if (isHeadingText(node)) found.push({ id, size: node.fontSize ?? 18 }); return; }
+    if (node.role === 'heading') { found.push({ id, size: largest(node) }); return; }
+    node.children?.forEach(visit);
+  };
+  visit(rootId);
+  const levels = new Map<string, HeadingLevel>();
+  if (found.length === 0) return levels;
+  const first = found.reduce((best, item) => (item.size > best.size ? item : best));
+  levels.set(first.id, top);
+  const sizes = [...new Set(found.filter((item) => item !== first).map((item) => item.size))].sort((a, b) => b - a);
+  for (const item of found) if (item !== first) levels.set(item.id, Math.min(4, top + 1 + sizes.indexOf(item.size)) as HeadingLevel);
+  return levels;
+}
+
+/** 제목 요소. 컨테이너 제목이면 안의 글자가 span이 된다. */
+export function headingElement(level: HeadingLevel): Element {
+  return { tag: `h${level}`, attrs: [], reset: TEXT_RESET, phrasing: true };
+}
+
+/**
+ * 텍스트 요소. 제목 단계는 headingLevels가 정한다(단계가 없는 제목은 h2·h3).
+ * 역할을 정한 글자는 그 역할의 요소가 된다(입력·비밀번호는 부르는 쪽이 input으로 바꾼다).
+ */
+export function textElement(node: DesignNode, phrasing: boolean, level?: HeadingLevel): Element {
   if (phrasing) return { tag: 'span', attrs: [], reset: {}, phrasing: true };
-  if (hasRole(node, 'heading') || looksLikeHeading(node)) {
-    const size = node.fontSize ?? 18;
-    return { tag: size >= 32 ? 'h1' : size >= 24 ? 'h2' : 'h3', attrs: [], reset: TEXT_RESET, phrasing: true };
-  }
+  if (node.role === 'decoration') return { tag: 'p', attrs: ['aria-hidden="true"'], reset: TEXT_RESET, phrasing: true };
+  if (node.role === 'button') return { tag: 'button', attrs: ['type="button"'], reset: BUTTON_RESET, phrasing: true };
+  if (level) return headingElement(level);
+  if (isHeadingText(node)) return headingElement((node.fontSize ?? 18) >= 24 ? 2 : 3);
   // 'Button label'처럼 다른 요소의 글자를 뜻하는 이름은 폼 라벨이 아니다.
   if (hasRole(node, 'label') && !hasRole(node, 'button') && !hasRole(node, 'link')) return { tag: 'label', attrs: [], reset: TEXT_RESET, phrasing: true };
   if (hasRole(node, 'link')) return { tag: 'a', attrs: ['href="#"'], reset: { ...TEXT_RESET, ...LINK_RESET }, phrasing: true };
@@ -111,14 +161,18 @@ function imageOnly(node: DesignNode): Extract<DesignNode['fills'][number], { typ
  */
 export function boxElement(node: DesignNode, phrasing: boolean, text: { any: boolean; input: boolean; label?: string }): Element {
   const image = imageOnly(node);
-  if (image) return { tag: 'img', attrs: [`alt=${JSON.stringify(altText(node.name))}`], reset: { display: 'block', objectFit: FIT[image.fit] ?? 'cover' }, phrasing: true, assetId: image.assetId };
+  const decoration = node.role === 'decoration';
+  if (image) return { tag: 'img', attrs: [`alt=${JSON.stringify(decoration ? '' : altText(node.name))}`], reset: { display: 'block', objectFit: FIT[image.fit] ?? 'cover' }, phrasing: true, assetId: image.assetId };
   if (node.type === 'rectangle' && adjustedImageFill(node)) {
     // img 대신 낸 색 보정 그림. 설명이 있는 이름이면 그림 역할과 이름을 붙인다(빈 alt와 같은 장식 그림이면 붙이지 않음).
-    const alt = altText(node.name);
+    const alt = decoration ? '' : altText(node.name);
     const attrs = alt ? ['role="img"', `aria-label=${JSON.stringify(alt)}`] : [];
     return phrasing ? { tag: 'span', attrs, reset: { display: 'block' }, phrasing: true } : { tag: 'div', attrs, reset: {}, phrasing: false };
   }
-  if (phrasing) return { tag: 'span', attrs: [], reset: { display: 'block' }, phrasing: true };
+  const marked = decoration ? ['aria-hidden="true"'] : node.role === 'image' ? ['role="img"', `aria-label=${JSON.stringify(cleanName(node.name))}`] : [];
+  if (phrasing) return { tag: 'span', attrs: marked, reset: { display: 'block' }, phrasing: true };
+  if (marked.length) return { tag: 'div', attrs: marked, reset: {}, phrasing: false };
+  if (node.role === 'checkbox') return { tag: 'label', attrs: [], reset: { display: 'block', cursor: 'pointer' }, phrasing: true };
   if (hasRole(node, 'button')) return { tag: 'button', attrs: ['type="button"', ...(text.any ? [] : [`aria-label=${JSON.stringify(text.label ?? cleanName(node.name))}`])], reset: BUTTON_RESET, phrasing: true };
   if (hasRole(node, 'input') && text.input) return { tag: 'label', attrs: [], reset: { display: 'block', cursor: 'text' }, phrasing: true };
   if (hasRole(node, 'link')) return { tag: 'a', attrs: ['href="#"'], reset: { display: 'block', ...LINK_RESET }, phrasing: true };

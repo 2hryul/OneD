@@ -53,6 +53,15 @@ describe('document model v2', () => {
     expect(() => parseDocument('{"version":2,"name":"x","pages":[]}')).toThrow();
     expect(() => parseDocument('{"version":1,"name":"x","nodes":[{"id":"a"}]}')).toThrow();
   });
+
+  it('keeps a layer role through save and reopen and rejects unknown roles', () => {
+    const doc = sampleDocument();
+    node(doc, 'rect-1').role = 'button';
+    expect(node(parseDocument(JSON.stringify(doc)), 'rect-1').role).toBe('button');
+    const unknown = structuredClone(doc);
+    (node(unknown, 'rect-1') as { role?: string }).role = 'carousel';
+    expect(() => parseDocument(JSON.stringify(unknown))).toThrow('Invalid role');
+  });
 });
 
 describe('changes', () => {

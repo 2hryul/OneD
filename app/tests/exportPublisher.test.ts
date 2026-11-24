@@ -383,3 +383,79 @@ describe('production-ready structure', () => {
     expect(file('components/Card.css')).not.toContain(':root');
   });
 });
+
+describe('layer roles', () => {
+  /** Urban Login처럼 입력란이 글자와 밑줄뿐이고 버튼이 글자인 화면. 이름으로는 역할을 알 수 없다. */
+  function bareLogin(): DesignDocument {
+    let doc: DesignDocument = { version: 5, name: 'Bare', components: {}, tokens: {}, pages: [{ id: PAGE, name: 'Page 1', children: [], objects: {} }] };
+    doc = add(doc, { id: 'screen', type: 'frame', name: 'Login', parentId: null, x: 0, y: 0, width: 600, height: 500, fills: solid('#ffffff') });
+    doc = add(doc, { id: 'title', type: 'text', name: 'Login', parentId: 'screen', x: 40, y: 20, width: 300, height: 40, fills: solid('#111111'), text: 'Login', fontSize: 24, fontWeight: 700 });
+    doc = add(doc, { id: 'email', type: 'text', name: 'Username or Email', parentId: 'screen', x: 40, y: 100, width: 300, height: 24, fills: solid('#555555'), text: 'Username or Email', fontSize: 16 });
+    doc = add(doc, { id: 'pw', type: 'text', name: 'Passowrd', parentId: 'screen', x: 40, y: 160, width: 300, height: 24, fills: solid('#555555'), text: 'Passowrd', fontSize: 16 });
+    doc = add(doc, { id: 'go', type: 'text', name: 'Login', parentId: 'screen', x: 40, y: 240, width: 300, height: 24, fills: solid('#ffffff'), text: 'Login', fontSize: 16 });
+    doc = add(doc, { id: 'menu', type: 'text', name: 'Destination', parentId: 'screen', x: 400, y: 20, width: 120, height: 24, fills: solid('#111111'), text: 'Destination', fontSize: 16 });
+    return doc;
+  }
+  const withRoles = (doc: DesignDocument, roles: Record<string, NodeInput['role']>): DesignDocument =>
+    Object.entries(roles).reduce((current, [id, role]) => apply(current, updateShape(current, PAGE, id, { role })), doc);
+  /** 글자 text를 담은 요소의 태그와 속성(class 제외). 글 내용이 이름인 레이어는 class가 역할 이름(title, input)이라 글자로 찾는다. */
+  const tagOf = (code: string, text: string): string[] =>
+    [...code.matchAll(/<(\w+) className="[^"]+"([^>]*?)(?:>\{\w+ \?\? "([^"]*)"\}|placeholder=\{\w+ \?\? "([^"]*)"\} \/>)/g)]
+      .filter((match) => (match[3] ?? match[4]) === text).map((match) => `${match[1]}${match[2]!.replace(/\s+$/, '')}`);
+
+  it('exports the roles a publisher picked even when layer names say nothing', () => {
+    expect(exportTsx(bareLogin(), PAGE, 'screen').code).not.toMatch(/<input|<button|<a /);
+    const { code } = exportTsx(withRoles(bareLogin(), { email: 'input', pw: 'password', go: 'button', menu: 'link' }), PAGE, 'screen');
+    expect(tagOf(code, 'Username or Email')).toEqual(['input type="text"']);
+    expect(tagOf(code, 'Passowrd')).toEqual(['input type="password"']);
+    // 제목 Login(24px 굵게)은 그대로 제목이고, 버튼으로 정한 Login 글자는 버튼이다.
+    expect(tagOf(code, 'Login')).toEqual(['h1', 'button type="button"']);
+    expect(tagOf(code, 'Destination')).toEqual(['a href="#"']);
+    compiles(code);
+  });
+
+  it('lets a picked role win over the layer name, and falls back to the name when cleared', () => {
+    const doc = loginForm();
+    // 이름이 Button/Primary여도 장식으로 정하면 버튼이 아니고 보조 기술에서 숨긴다.
+    const decorated = exportTsx(withRoles(doc, { submit: 'decoration' }), PAGE, 'form').code;
+    expect(decorated).not.toContain('<button');
+    expect(decorated).toMatch(/<div className="login-form__button-primary" aria-hidden="true">/);
+    // 역할을 지우면 이름으로 짐작하던 그대로다.
+    const cleared = withRoles(withRoles(doc, { submit: 'decoration' }), { submit: undefined });
+    expect(exportTsx(cleared, PAGE, 'form').code).toBe(exportTsx(doc, PAGE, 'form').code);
+  });
+
+  it('keeps one h1 per screen and ranks the other headings by size', () => {
+    let doc = bareLogin();
+    doc = add(doc, { id: 'hero', type: 'text', name: 'Hi I am Mary', parentId: 'screen', x: 40, y: 300, width: 500, height: 60, fills: solid('#111111'), text: 'Hi I am Mary', fontSize: 48, fontWeight: 700 });
+    doc = add(doc, { id: 'about', type: 'text', name: 'About me', parentId: 'screen', x: 40, y: 380, width: 300, height: 40, fills: solid('#111111'), text: 'About me', fontSize: 36, fontWeight: 700 });
+    doc = add(doc, { id: 'twin', type: 'text', name: 'Lets connect', parentId: 'screen', x: 40, y: 430, width: 300, height: 60, fills: solid('#111111'), text: 'Lets connect', fontSize: 48, fontWeight: 700 });
+    const { code } = exportTsx(doc, PAGE, 'screen');
+    expect(code.match(/<h1 /g)).toHaveLength(1);
+    // 가장 큰 제목 중 문서에서 먼저 나온 것이 h1, 같은 48px의 두 번째 제목은 h2, 36px는 h3, 24px는 h4다.
+    expect(tagOf(code, 'Hi I am Mary')).toEqual(['h1']);
+    expect(tagOf(code, 'Lets connect')).toEqual(['h2']);
+    expect(tagOf(code, 'About me')).toEqual(['h3']);
+    expect(tagOf(code, 'Login')).toEqual(['h4', 'p']);
+    // 제목 역할을 정하면 작은 글자도 제목이고, 다른 역할을 정한 큰 굵은 글자는 제목이 아니다.
+    const picked = exportTsx(withRoles(doc, { menu: 'heading', hero: 'link' }), PAGE, 'screen').code;
+    expect(tagOf(picked, 'Hi I am Mary')).toEqual(['a href="#"']);
+    expect(tagOf(picked, 'Lets connect')).toEqual(['h1']);
+    expect(tagOf(picked, 'Destination')).toEqual(['h4']);
+  });
+
+  it('turns a checkbox role into a label with a real checkbox, and an image role into one SVG file', () => {
+    let doc = bareLogin();
+    doc = add(doc, { id: 'remember', type: 'frame', name: 'Frame 9', parentId: 'screen', x: 40, y: 300, width: 200, height: 24, fills: [] });
+    doc = add(doc, { id: 'box', type: 'rectangle', name: 'Rectangle 3', parentId: 'remember', x: 40, y: 300, width: 24, height: 24, fills: solid('#dddddd') });
+    doc = add(doc, { id: 'remember-text', type: 'text', name: 'Remember me', parentId: 'remember', x: 72, y: 300, width: 120, height: 24, fills: solid('#111111'), text: 'Remember me', fontSize: 16 });
+    doc = add(doc, { id: 'logo', type: 'group', name: 'Brand logo', parentId: 'screen', x: 400, y: 300, width: 40, height: 40, fills: [] });
+    doc = add(doc, { id: 'logo-a', type: 'ellipse', name: 'Ellipse 1', parentId: 'logo', x: 400, y: 300, width: 40, height: 40, fills: solid('#ff6633') });
+    const { code, css, files } = exportTsx(withRoles(doc, { remember: 'checkbox', logo: 'image' }), PAGE, 'screen');
+    expect(code).toMatch(/<label className="login__field">\s*<input className="login__control" type="checkbox" \/>/);
+    expect(css).toMatch(/\.login__control \{[^}]*clip: rect\(0 0 0 0\);/);
+    expect(code).toMatch(/<img className="login__brand-logo" src=\{imageSrc1\} alt="Brand logo" \/>/);
+    expect(files.some((file) => file.path === 'assets/brand-logo.svg')).toBe(true);
+    compiles(code);
+  });
+});
