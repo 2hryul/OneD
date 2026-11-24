@@ -6,7 +6,8 @@ import { adjustedImageFill, fontStack, pathPaint, paintsToBackground, strokeAndE
 import { pathToD } from './path';
 import { inferFlow, type FlowMargin } from './flowInfer';
 import { cssText, declarations, kebab, tokenCss, tokenVars, typographyVar, uniqueIn, withTokens, type CssRule, type Style, type TokenVars } from './exportCss';
-import { boxElement, cleanName, controlState, fieldControl, fieldKind, firstText, hasRole, inputElement, isIcon, selectBox, textElement, VISUALLY_HIDDEN, type ControlState, type Element, type FieldKind } from './exportMarkup';
+import { nodesToSvg } from './svgExport';
+import { altText, boxElement, cleanName, controlState, fieldControl, fieldKind, firstText, hasRole, inputElement, isIcon, selectBox, textElement, VISUALLY_HIDDEN, type ControlState, type Element, type FieldKind } from './exportMarkup';
 
 const JUSTIFY_CSS = { start: 'flex-start', center: 'center', end: 'flex-end', 'space-between': 'space-between' } as const;
 const ALIGN_CSS = { start: 'flex-start', center: 'center', end: 'flex-end', stretch: 'stretch' } as const;
@@ -288,11 +289,50 @@ interface Rendered { body: string[]; usesId: boolean; rules: CssRule[]; rootTag?
  * 파일 하나를 만드는 동안의 상태. rules는 CSS 규칙을 쓸 순서대로 모은다(컴포넌트 규칙이 그것을 쓰는 쪽보다 앞).
  * images는 img로 낸 그림 id → import 변수 이름, assets는 코드·CSS가 쓴 모든 그림 id, missing은 파일이 없어 빈 자리로 낸 그림 id다.
  * flow는 화면을 흐름 배치로 바꾼 결과(inferFlow)의 요소별 margin과 레이아웃을 새로 붙인 컨테이너다. 컴포넌트 내보내기에는 없다.
+ * illustrations는 SVG 파일 하나로 낼 일러스트 도형 id, generated는 그렇게 만든 파일(도형 id → assets 안 파일 이름과 내용)이다.
  */
 interface ExportState {
   doc: DesignDocument; plans: Map<string, ComponentPlan>; names: Set<string>; classes: Set<string>; rules: CssRule[]; vars: TokenVars;
   images: Map<string, string>; assets: Set<string>; missing: Set<string>; assetFile: (assetId: string) => string; hasAsset: (assetId: string) => boolean; usesId: boolean;
   flow: { margins: ReadonlyMap<string, FlowMargin>; inferred: ReadonlySet<string>; zIndex: ReadonlyMap<string, number>; gutters: ReadonlySet<string> };
+  illustrations: ReadonlySet<string>; generated: Map<string, { file: string; data: string }>;
+}
+
+/** 내보내기가 만든 파일(일러스트 SVG)을 가리키는 그림 키. 저장소 그림 id와 섞이지 않게 앞에 붙인다. */
+const GENERATED = 'generated:';
+const assetPath = (state: ExportState, key: string): string => (key.startsWith(GENERATED) ? key.slice(GENERATED.length) : state.assetFile(key));
+
+/**
+ * 일러스트로 볼 최소 도형 수와 최소 크기. 이보다 적거나 작은 아이콘(24px 등)은 인라인 svg가 색을 바꾸기 쉬워 그대로 둔다.
+ * 도형 20개 이상인 탈것·사물 그림(Urban 카드의 버스·기차 20~49개)도 파일로 내야 모바일에서 함께 줄어든다.
+ */
+const ILLUSTRATION_MIN_SHAPES = 20;
+const ILLUSTRATION_MIN_SIZE = 48;
+
+/**
+ * SVG 파일 하나로 낼 일러스트. 도형(벡터·사각형·타원·불리언)이 20개 이상, 짧은 변 48px 이상이고 글·그림 채우기·인스턴스·인터랙션이 없는
+ * 프레임·그룹 중 가장 바깥 것이다. 오토 레이아웃 프레임과 화면 루트는 빼고, 숨긴 도형은 세지 않는다.
+ * 글은 SVG <img> 안에서 글꼴을 못 불러오고, 그림은 외부 파일을 못 불러오며, 인스턴스·인터랙션은 코드로 남아야 하기 때문이다.
+ */
+export function findIllustrations(page: Page, rootId: string, hidden: ReadonlySet<string>): Set<string> {
+  const found = new Set<string>();
+  const visit = (id: string): { shapes: number; blocked: boolean } => {
+    const node = page.objects[id];
+    if (!node || hidden.has(id)) return { shapes: 0, blocked: false };
+    let shapes = node.type === 'vector' || node.path || node.boolOp || node.type === 'ellipse' || node.type === 'rectangle' ? 1 : 0;
+    let blocked = node.type === 'text' || Boolean(node.componentId && !node.mainInstance) || node.fills.some((paint) => paint.type === 'image') || Boolean(node.interactions?.length);
+    const kids = (node.children ?? []).map(visit);
+    for (const kid of kids) { shapes += kid.shapes; blocked ||= kid.blocked; }
+    // 회전한 묶음은 SVG 영역(회전 후 외곽)과 요소 상자가 달라 빼고, 뒤집기만 한 묶음은 상자가 같아 넣는다.
+    const unrotated = Math.abs(node.transform[1]) < 1e-6 && Math.abs(node.transform[2]) < 1e-6;
+    if (id !== rootId && (node.type === 'frame' || node.type === 'group') && !node.layout && !blocked && unrotated && shapes >= ILLUSTRATION_MIN_SHAPES && Math.min(node.width, node.height) >= ILLUSTRATION_MIN_SIZE) {
+      for (const inner of walkPage(page, [id])) if (inner.id !== id) found.delete(inner.id);
+      found.add(id);
+    }
+    return { shapes, blocked };
+  };
+  visit(rootId);
+  return found;
 }
 
 /**
@@ -407,10 +447,31 @@ function textOf(node: DesignNode, phrasing: boolean, context: RenderContext): El
   return textElement(node, phrasing);
 }
 
+/**
+ * 일러스트를 SVG 파일 하나와 그것을 가리키는 img로 낸다. 파일 이름은 레이어 이름에서 만들고(겹치면 번호), assets/ 아래에 둔다.
+ * 글이 없으므로 줄나눔 측정은 쓰지 않고, 그림 채우기가 없으므로 그림 주소도 쓰지 않는다(findIllustrations가 걸러 둔다).
+ */
+function illustrationElement(node: DesignNode, context: RenderContext): Element {
+  const { state } = context;
+  let entry = state.generated.get(node.id);
+  if (!entry) {
+    const taken = new Set([...state.generated.values()].map((item) => item.file));
+    // 'Frame', 'Group 12' 같은 기본 이름은 뜻이 없으므로 illustration으로 둔다.
+    const base = kebab(meaningfulName(node) ?? 'illustration', 'illustration');
+    let file = `${base}.svg`;
+    for (let n = 2; taken.has(file); n++) file = `${base}-${n}.svg`;
+    const data = nodesToSvg(context.page, [node.id], { image: () => null, measure: {} as CanvasRenderingContext2D }) ?? '<svg xmlns="http://www.w3.org/2000/svg"/>';
+    entry = { file, data: `${data}\n` };
+    state.generated.set(node.id, entry);
+  }
+  return { tag: 'img', attrs: [`alt=${JSON.stringify(altText(node.name))}`], reset: { display: 'block' }, phrasing: true, assetId: `${GENERATED}${entry.file}` };
+}
+
 /** 도형에 맞는 HTML 요소. input 이름 컨테이너를 만나면 그 안의 첫 텍스트를 입력창으로 예약한다. */
 function elementOf(node: DesignNode, phrasing: boolean, context: RenderContext): Element {
   if (node.type === 'text') return textOf(node, phrasing, context);
   if (node.path || node.type === 'vector') return { tag: 'svg', attrs: [], reset: {}, phrasing: true };
+  if (context.state.illustrations.has(node.id)) return illustrationElement(node, context);
   const field = context.field;
   if (field && node.id === field.labelId) { context.usesId = true; return { tag: 'label', attrs: ['htmlFor={fieldId}'], reset: { display: 'block' }, phrasing: true }; }
   if (field && node.id === field.boxId && field.kind.control === 'select') { context.usesId = true; return withDescription(selectBox(field.state), field); }
@@ -510,6 +571,18 @@ function addRule(context: RenderContext, className: string, node: DesignNode, pa
   const zIndex = state.flow.zIndex.get(node.id);
   if (zIndex !== undefined) style.zIndex = String(zIndex);
   if (element.tag === 'img') delete style.background;
+  // 일러스트 SVG에는 채우기·선·그림자·흐림·투명도·모서리 자르기가 이미 들어 있다. CSS로 한 번 더 걸지 않는다.
+  if (element.assetId?.startsWith(GENERATED)) {
+    // 뒤집기(scaleX(-1))도 SVG 좌표에 이미 들어 있다. CSS로 한 번 더 뒤집으면 원래대로 돌아가 버린다.
+    for (const key of ['outline', 'outlineOffset', 'boxShadow', 'filter', 'opacity', 'overflow', 'borderRadius', 'transform']) delete style[key];
+    // 흐름 배치 안에서 절대 위치로 남은 일러스트(밖으로 삐져나온 배경·장식)는 왼쪽 자리와 폭을 부모 폭에 대한 %로 내고 높이는 비율로 둔다.
+    // 디자인 폭에서는 같은 자리이고, 화면이 줄면 잘리지 않고 함께 줄어든다.
+    const shrinkingParent = parent && (state.flow.inferred.has(parent.id) || (context.fluid && parent.id === context.rootId));
+    if (style.position === 'absolute' && parent && shrinkingParent && typeof style.left === 'number' && typeof style.width === 'number' && parent.width > 0) {
+      const percent = (value: number): string => `${Math.round((value / parent.width) * 10000) / 100}%`;
+      Object.assign(style, { left: percent(style.left), width: percent(style.width), height: 'auto', aspectRatio: `${round(node.width)} / ${round(node.height)}` });
+    }
+  }
   // 색 보정한 그림은 ::before 겹에만 filter를 건다. isolation으로 쌓임 맥락을 만들어 z-index -1 겹이 요소 배경 위·자식 아래에 깔리게 한다.
   const adjusted = adjustedImageFill(node);
   if (adjusted) style.isolation = 'isolate';
@@ -544,7 +617,7 @@ function openAttrs(className: string, root: boolean, attrs: string[], rootAttrs:
 /** img 요소의 src. 그림은 파일 맨 위에서 import한다(번들러가 경로와 캐시 이름을 처리한다). */
 function imageSource(context: RenderContext, assetId: string): string {
   const { state } = context;
-  state.assets.add(assetId);
+  if (!assetId.startsWith(GENERATED)) state.assets.add(assetId);
   context.owner.images.add(assetId);
   const existing = state.images.get(assetId);
   if (existing) return `src={${existing}}`;
@@ -1066,7 +1139,7 @@ export function exportTsx(doc: DesignDocument, pageId: string, selectedId: strin
   const page = doc.pages.find((item) => item.id === pageId);
   const root = page?.objects[selectedId];
   if (!page || !root) throw new Error('Select a node to export');
-  const state: ExportState = { doc, plans: new Map(), names: new Set(), classes: new Set(), rules: [], vars: tokenVars(doc), images: new Map(), assets: new Set(), missing: new Set(), assetFile: options.assetFile ?? ((id) => id), hasAsset: options.hasAsset ?? (() => true), usesId: false, flow: { margins: new Map(), inferred: new Set(), zIndex: new Map(), gutters: new Set() } };
+  const state: ExportState = { doc, plans: new Map(), names: new Set(), classes: new Set(), rules: [], vars: tokenVars(doc), images: new Map(), assets: new Set(), missing: new Set(), assetFile: options.assetFile ?? ((id) => id), hasAsset: options.hasAsset ?? (() => true), usesId: false, flow: { margins: new Map(), inferred: new Set(), zIndex: new Map(), gutters: new Set() }, illustrations: new Set(), generated: new Map() };
   const componentId = root.componentId ?? (root.componentSet ? Object.values(doc.components).find((item) => item.setId === root.id)?.id : undefined);
   if (componentId && (root.mainInstance || root.componentSet)) {
     const plan = ensurePlan(state, componentId);
@@ -1079,7 +1152,9 @@ export function exportTsx(doc: DesignDocument, pageId: string, selectedId: strin
   const texts = walkPage(page, [selectedId]).filter((node) => node.type === 'text' && !hidden.has(node.id) && !(node.id !== selectedId && insideInstanceBelow(page, node, selectedId)));
   const props = new Map(texts.map((node, index) => [node.id, screenPropName(node, index)]));
   // 오토 레이아웃이 없는 프레임·그룹은 흐름 배치로 바꿔 낸다(좁은 화면에서 줄바꿈·세로 쌓기가 되도록). 인스턴스 안은 컴포넌트가 따로 낸다.
-  const flow = inferFlow(page, selectedId, hidden, (node) => node.id !== selectedId && Boolean(node.componentId));
+  // 일러스트(도형이 많고 글·그림이 없는 묶음)는 SVG 파일 하나로 내므로 흐름 배치도 안쪽을 건드리지 않는다.
+  state.illustrations = findIllustrations(page, selectedId, hidden);
+  const flow = inferFlow(page, selectedId, hidden, (node) => (node.id !== selectedId && Boolean(node.componentId)) || state.illustrations.has(node.id));
   state.flow = flow;
   const rendered = commit(state, owner, renderRoot(state, flow.page, flow.page.objects[selectedId]!, name, { textProp: (node) => props.get(node.id), fluid: true, owner }));
   const names = texts.map((node) => props.get(node.id)!);
@@ -1110,7 +1185,7 @@ function reactImport(usesId: boolean): string {
 
 function result(state: ExportState, name: string, screen?: { owner: Owner; code: string[] }): ExportResult {
   const cssFile = `${name}.css`;
-  const images = [...state.images].map(([assetId, variable]) => `import ${variable} from './assets/${state.assetFile(assetId)}';`);
+  const images = [...state.images].map(([assetId, variable]) => `import ${variable} from './assets/${assetPath(state, assetId)}';`);
   const code = [reactImport(state.usesId), `import './${cssFile}';`, ...images, '', ...(screen?.code ?? []), ...[...state.plans.values()].flatMap((plan) => plan.code)].join('\n');
   return { name, code, css: cssText(state.rules, state.vars), cssFile, assets: [...state.assets], missingAssets: [...state.missing], files: splitFiles(state, screen) };
 }
@@ -1127,6 +1202,8 @@ function splitFiles(state: ExportState, screen?: { owner: Owner; code: string[] 
   for (const plan of plans) files.push(...ownerFiles(state, plan.owner, plan.code, 'components/', '../', './'));
   if (screen) files.push(...ownerFiles(state, screen.owner, screen.code, '', './', './components/'));
   if (plans.length) files.push({ path: 'components/index.ts', data: `${plans.map((plan) => `export * from './${plan.name}';`).join('\n')}\n` });
+  // 일러스트 SVG는 코드가 import하는 그림 파일이다(저장소의 그림과 달리 내보내기가 만든다).
+  for (const { file, data } of state.generated.values()) files.push({ path: `assets/${file}`, data });
   return files;
 }
 
@@ -1139,7 +1216,7 @@ function ownerFiles(state: ExportState, owner: Owner, code: string[], folder: st
     reactImport(owner.usesId),
     ...(state.vars.declarations.length || state.vars.families.size ? [`import '${up}tokens.css';`] : []),
     ...[...owner.uses].map((used) => `import { ${used} } from '${components}${used}';`),
-    ...[...owner.images].map((assetId) => `import ${state.images.get(assetId)} from '${up}assets/${state.assetFile(assetId)}';`),
+    ...[...owner.images].map((assetId) => `import ${state.images.get(assetId)} from '${up}assets/${assetPath(state, assetId)}';`),
     ...(css ? [`import './${owner.name}.css';`] : [])
   ];
   const files: ExportFile[] = [{ path: `${folder}${owner.name}.tsx`, data: `${[...imports, '', ...code].join('\n').trimEnd()}\n` }];
