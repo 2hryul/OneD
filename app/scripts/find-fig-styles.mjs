@@ -1,11 +1,11 @@
 // .fig 파일 전체에서 스타일 종류별 사용 수와, 그 스타일을 쓰는 최상위 프레임 예시를 찾는다. 가져오기 검증용 노드를 고를 때 쓴다.
 // 사용법: node scripts/find-fig-styles.mjs <file.fig>
 import { readFileSync } from 'node:fs';
-import { parseFig } from 'openfig-core';
+import { readFigFile } from '../src/figmaImport.ts';
 
 const [filePath] = process.argv.slice(2);
 if (!filePath) throw new Error('Usage: node scripts/find-fig-styles.mjs <file.fig>');
-const fig = parseFig(new Uint8Array(readFileSync(filePath)));
+const fig = readFigFile(new Uint8Array(readFileSync(filePath)));
 const id = (guid) => `${guid.sessionID}:${guid.localID}`;
 const parentOf = (node) => (node.parentIndex?.guid ? fig.nodeMap.get(id(node.parentIndex.guid)) : undefined);
 

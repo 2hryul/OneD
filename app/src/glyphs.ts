@@ -15,14 +15,17 @@ const BLOB_COMMANDS: Record<number, { letter: string; floats: number }> = {
 };
 
 /**
- * 글리프 윤곽 blob(em 단위, y 위쪽)을 글자 상자 좌표의 SVG 경로로 바꾼다. 읽지 못하는 명령이 있으면 null이다.
+ * 글리프 윤곽 blob(em 단위, y 위쪽)을 글자 상자 좌표의 SVG 경로로 바꾼다. 읽지 못하는 명령, 유한하지 않은 좌표,
+ * 첫 이동 전의 그리기가 있으면 null이다(브라우저가 버리는 경로를 내지 않는다).
  * openfig-core의 geometryBlobToSVGPath는 2차 곡선을 몰라 첫 곡선에서 멈추고, 좌표를 em 단위 소수 둘째 자리로 반올림해
  * 큰 글자가 뭉개지므로 직접 읽는다. 윤곽마다 앞에 붙는 닫기 명령은 열린 윤곽이 없을 때 버린다(경로가 Z로 시작하면 브라우저가 경로 전체를 버린다).
+ * 닫기 뒤 이동 없이 오는 그리기는 SVG처럼 닫은 윤곽의 시작점에서 이어 그린다.
  */
 export function glyphBlobToPath(bytes: Uint8Array, size: number, origin: { x: number; y: number }): string | null {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const round = (value: number): number => Math.round(value * 1000) / 1000;
   const parts: string[] = [];
+  let started = false;
   let open = false;
   let offset = 0;
   while (offset < bytes.length) {
@@ -31,12 +34,14 @@ export function glyphBlobToPath(bytes: Uint8Array, size: number, origin: { x: nu
     const numbers: number[] = [];
     for (let index = 0; index < command.floats; index++) {
       const value = view.getFloat32(offset + index * 4, true);
-      numbers.push(round(index % 2 === 0 ? origin.x + value * size : origin.y - value * size));
+      const point = index % 2 === 0 ? origin.x + value * size : origin.y - value * size;
+      if (!Number.isFinite(point)) return null;
+      numbers.push(round(point));
     }
     offset += command.floats * 4;
     if (command.letter === 'Z') { if (open) parts.push('Z'); open = false; continue; }
-    if (command.letter !== 'M' && !open) return null;
-    open = true;
+    if (command.letter !== 'M' && !started) return null;
+    started = open = true;
     parts.push(`${command.letter}${numbers.join(' ')}`);
   }
   return parts.join(' ');
@@ -51,8 +56,9 @@ export function figGlyphPath(fig: FigDocument, node: FigNode): string | null {
   const glyphs = ((node as { derivedTextData?: { glyphs?: FigGlyph[] } }).derivedTextData?.glyphs ?? []);
   const parts: string[] = [];
   for (const glyph of glyphs) {
-    // 공백 글리프는 blob이 없다.
-    if (glyph.commandsBlob === undefined || !glyph.position) continue;
+    // 공백 글리프는 blob이 없다. blob이 있는데 위치가 없으면 그 글자를 놓을 수 없으므로 대체 글꼴로 그린다.
+    if (glyph.commandsBlob === undefined) continue;
+    if (!glyph.position) return null;
     let bytes: Uint8Array | null | undefined;
     try { bytes = getBlobBytes(fig, glyph.commandsBlob); } catch { return null; }
     if (!bytes) return null;

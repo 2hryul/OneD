@@ -1,14 +1,13 @@
 // Figma가 계산해 파일에 저장한 Auto Layout 결과와 이 편집기의 레이아웃 엔진 결과를 비교한다.
 // 사용법: node --experimental-strip-types scripts/check-layout-fidelity.mjs <file.fig> <node-id> [허용오차px=0.5]
 import { readFileSync } from 'node:fs';
-import { parseFig } from 'openfig-core';
-import { importFigNode } from '../src/figmaImport.ts';
+import { importFigNode, readFigFile } from '../src/figmaImport.ts';
 import { layoutContainer, layoutContainers } from '../src/layoutEdits.ts';
 
 const [filePath, rootId, toleranceArg] = process.argv.slice(2);
 if (!filePath || !rootId) throw new Error('Usage: node --experimental-strip-types scripts/check-layout-fidelity.mjs <file.fig> <node-id> [tolerance]');
 const tolerance = Number(toleranceArg ?? 0.5);
-const { document } = importFigNode(parseFig(new Uint8Array(readFileSync(filePath))), rootId);
+const { document } = importFigNode(readFigFile(new Uint8Array(readFileSync(filePath))), rootId);
 const page = document.pages[0];
 // 인스턴스 안쪽 노드는 파일에 저장돼 있지 않고 마스터 컴포넌트 크기 그대로 펼쳐진다. Figma가 계산한 값이 아니므로 따로 센다.
 const insideInstance = (id) => { for (let p = page.objects[id]?.parentId; p; p = page.objects[p]?.parentId) if (page.objects[p]?.sourceType === 'INSTANCE') return true; return false; };

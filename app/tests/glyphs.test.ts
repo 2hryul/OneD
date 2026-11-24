@@ -2,7 +2,7 @@ import { deflateRawSync } from 'node:zlib';
 import { describe, expect, it } from 'vitest';
 import { assembleCanvasFig, createEmptyFigDoc, createFigZip, encodeCommandsBlob, encodeFigParts, type FigDocument, type FigNode } from 'openfig-core';
 import { importFigNode, listFigFrames, readFigFile } from '../src/figmaImport';
-import { figGlyphPath, glyphKey, glyphOutline } from '../src/glyphs';
+import { figGlyphPath, glyphBlobToPath, glyphKey, glyphOutline } from '../src/glyphs';
 import { parseDocument, walkPage, type DesignNode } from '../src/model';
 
 /** 가짜 Figma 노드. patch로 필요한 필드만 덮는다. */
@@ -82,6 +82,24 @@ describe('glyph outlines for fonts this PC does not have', () => {
     // 이전 버전이 저장한 윤곽(Z로 시작해 브라우저가 버림)은 쓰지 않는다.
     const node = textOf(textFile(), () => false);
     expect(glyphOutline({ ...node, glyphs: { ...node.glyphs!, d: 'Z M10 28 L38 28 Z' } }, () => false)).toBeNull();
+  });
+
+  it('never emits a path the browser would drop, and falls back instead', () => {
+    const origin = { x: 10, y: 28 };
+    // 유한하지 않은 좌표가 든 경로는 브라우저가 버려 글자가 사라진다. 대체 글꼴로 그리도록 null이다.
+    expect(glyphBlobToPath(blob([1, Number.NaN, 0], [2, 1, 0], [0]), 28, origin)).toBeNull();
+    expect(glyphBlobToPath(blob([1, 0, 0], [2, Number.POSITIVE_INFINITY, 0], [0]), 28, origin)).toBeNull();
+    expect(glyphBlobToPath(blob([2, 1, 0]), 28, origin)).toBeNull();
+    // 닫기 뒤 이동 없이 이어지는 그리기는 SVG가 허용한다(닫은 윤곽의 시작점에서 이어 그림).
+    expect(glyphBlobToPath(blob([1, 0, 0], [2, 1, 0], [2, 1, 1], [0], [2, 0, 1], [2, -1, 1], [0]), 28, origin)).toBe('M10 28 L38 28 L38 0 Z L10 0 L-18 0 Z');
+  });
+
+  it('falls back when a glyph has an outline but no position', () => {
+    const fig = textFile({ derivedTextData: { glyphs: [{ commandsBlob: 0, fontSize: 28, position: { x: 0, y: 28 } }, { commandsBlob: 0, fontSize: 28 }, { fontSize: 28, position: { x: 56, y: 28 } }] } });
+    expect(figGlyphPath(fig, fig.nodeMap.get('1:2')!)).toBeNull();
+    // 공백처럼 blob이 없는 글리프는 그냥 건너뛴다.
+    const spaced = textFile({ derivedTextData: { glyphs: [{ commandsBlob: 0, fontSize: 28, position: { x: 0, y: 28 } }, { fontSize: 28, position: { x: 28, y: 28 } }] } });
+    expect(figGlyphPath(spaced, spaced.nodeMap.get('1:2')!)).toBe('M0 28 L28 28 L28 0 L0 0 Z');
   });
 
   it('skips text with style runs because the outline cannot follow them', () => {

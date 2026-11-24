@@ -1,11 +1,11 @@
 // .fig 파일의 선택 노드 하위에서 쓰이는 스타일 종류를 집계한다. 3단계 우선순위를 정하는 근거 자료용.
 // 사용법: node scripts/probe-fig-styles.mjs <file.fig> <node-id>
 import { readFileSync } from 'node:fs';
-import { parseFig } from 'openfig-core';
+import { readFigFile } from '../src/figmaImport.ts';
 
 const [filePath, rootId] = process.argv.slice(2);
 if (!filePath || !rootId) throw new Error('Usage: node scripts/probe-fig-styles.mjs <file.fig> <node-id>');
-const fig = parseFig(new Uint8Array(readFileSync(filePath)));
+const fig = readFigFile(new Uint8Array(readFileSync(filePath)));
 const id = (guid) => `${guid.sessionID}:${guid.localID}`;
 const counts = new Map();
 const bump = (key) => counts.set(key, (counts.get(key) ?? 0) + 1);
