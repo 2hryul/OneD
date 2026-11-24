@@ -92,7 +92,8 @@ export function headingLevels(page: Page, rootId: string, hidden: ReadonlySet<st
     if (!node || hidden.has(id) || options.skip?.has(id)) return;
     if (id !== rootId && node.componentId && !node.mainInstance) return;
     if (id === rootId && options.rootName) node = { ...node, name: `${options.rootName} ${node.name}` };
-    if (hasRole(node, 'button') || hasRole(node, 'link') || hasRole(node, 'input') || node.role === 'checkbox' || node.role === 'decoration') return;
+    // 누를 수 있는 것(역할, 프로토타입 클릭 연결)의 글자는 제목이 아니다.
+    if (hasRole(node, 'button') || hasRole(node, 'link') || hasRole(node, 'input') || node.role === 'checkbox' || node.role === 'decoration' || node.interactions?.some((item) => item.trigger === 'click')) return;
     if (node.type === 'text') { if (isHeadingText(node)) found.push({ id, size: node.fontSize ?? 18 }); return; }
     if (node.role === 'heading') { found.push({ id, size: largest(node) }); return; }
     node.children?.forEach(visit);

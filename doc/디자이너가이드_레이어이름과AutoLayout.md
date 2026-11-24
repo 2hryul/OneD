@@ -45,6 +45,30 @@ Figma에서 만든 화면을 Canvas Studio로 가져와 React 코드로 내보�
 - 도형이 적은 로고도 그림 파일로 내려면 묶음에 **웹 역할 → 그림**을 고른다.
 - **장식(읽지 않음)**은 스크린 리더가 읽지 않게 한다(`aria-hidden`, 그림이면 `alt=""`). 배경 무늬, 구분선 묶음에 쓴다.
 
+## 상태 variant
+
+- 버튼 같은 컴포넌트 세트에 `State` 속성을 두고 값을 `Default`, `Hover`, `Pressed`, `Focus`, `Disabled`로 지으면 상태가 CSS가 된다. `Hover`는 `:hover`, `Pressed`는 `:active`, `Focus`는 `:focus-visible`, `Disabled`는 `:disabled`(버튼이 아니면 `[data-disabled]`)다.
+- 상태는 prop이 아니다. 마우스와 키보드가 정한다. `Disabled` 값이 있으면 `disabled` prop 하나가 생긴다.
+- 같은 뜻의 값도 알아본다. `Normal`·`Rest`·`Enabled`는 기본, `Hovered`, `Press`·`Clicked`, `Focused`, `Inactive`다. `Active`는 탭의 선택됨으로도 써서 상태로 보지 않는다.
+- 상태끼리는 색, 선, 그림자만 다르게 한다. 상태마다 레이어 구조(글자, 아이콘 수)가 다르면 합쳐지지 않아 hover 모양을 코드로 낼 수 없다.
+- 화면의 인스턴스에 `Hover`를 골라 두어도 코드에서는 기본 모양이다. `Disabled`만 `disabled`로 넘어간다.
+
+## 프로토타입 연결
+
+클릭 연결은 코드의 prop과 링크가 된다. 다른 트리거(마우스 올리기, 시간 지남)는 코드로 나가지 않는다.
+
+| 연결 | 코드 |
+|---|---|
+| 화면 이동 | `a`(이름이 버튼이면 `button`), 누르면 `onNavigate("<대상 프레임 이름>")` |
+| URL 열기 | `a href="<URL>" target="_blank"`. http·https 주소만 쓴다 |
+| 오버레이 열기·토글 | `button aria-haspopup="dialog"`, 누르면 `onOpenChange(true 또는 !open, "<오버레이 프레임 이름>")`. `open` prop이 열림 상태다 |
+| 오버레이 닫기 | 누르면 `onOpenChange(false, …)` |
+| 뒤로 | 누르면 `onBack()` |
+
+- 대상 프레임 이름이 코드에 그대로 들어가므로 `Dashboard`, `Login`처럼 짓는다.
+- 인스턴스에 건 연결은 컴포넌트에 `onClick`으로 넘어간다.
+- 입력란(역할이나 이름이 input)은 `emailValue`와 `onEmailChange`처럼 값과 바뀜 콜백 prop을 받는다. 이름은 레이어 이름에서 짓고, 이름이 `Placeholder`처럼 일반 단어면 placeholder 글자로 짓는다.
+
 ## Auto Layout 사용 규칙
 
 Auto Layout이 있는 프레임은 그대로 `display: flex`가 된다. 없는 프레임은 내보내기가 위치를 보고 줄과 열을 짐작한다. 짐작보다 Auto Layout이 정확하므로 다음 자리는 Auto Layout으로 만든다.

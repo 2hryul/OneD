@@ -1,4 +1,4 @@
-import { variantName, walkPage, type Component, type DesignDocument, type DesignNode, type GridLayout, type Page } from './model';
+import { variantName, walkPage, type Component, type DesignDocument, type DesignNode, type GridLayout, type InteractionAction, type LayerRole, type Page } from './model';
 import { formatTracks } from './gridLayout';
 import { hasMask, maskImageUrl, maskRuns } from './mask';
 import { applyPoint, center, invert, isFlipped, linearPart, multiply, rotationDegrees, worldMatrix } from './geometry';
@@ -7,6 +7,7 @@ import { pathToD } from './path';
 import { inferFlow, type FlowMargin } from './flowInfer';
 import { cssText, declarations, kebab, tokenCss, tokenVars, typographyVar, uniqueIn, withTokens, type CssRule, type Style, type TokenVars } from './exportCss';
 import { nodesToSvg } from './svgExport';
+import { safeUrl } from './prototype';
 import { altText, boxElement, cleanName, controlState, fieldControl, fieldKind, firstText, hasRole, headingElement, headingLevels, inputElement, isIcon, selectBox, textElement, VISUALLY_HIDDEN, type ControlState, type Element, type FieldKind, type HeadingLevel } from './exportMarkup';
 
 const JUSTIFY_CSS = { start: 'flex-start', center: 'center', end: 'flex-end', 'space-between': 'space-between' } as const;
@@ -260,6 +261,36 @@ function withTypography(style: Style, node: DesignNode, vars: TokenVars): Style 
   return { ...rest, font: typographyVar(vars, { family: node.fontFamily, stack: fontStack(node.fontFamily), size: node.fontSize ?? 18, weight: node.fontWeight ?? 400, lineHeight: node.lineHeight }) };
 }
 
+/**
+ * variant 속성 하나. state가 있으면 값이 모두 상호작용 상태(Default·Hover·Pressed·Focus·Disabled)인 속성이다.
+ * 이 속성은 prop이 아니라 CSS 가상 클래스(:hover, :active, :focus-visible)가 되고, Disabled 값이 있으면 prop 이름(prop)은 disabled다.
+ */
+interface VariantProp { key: string; prop: string; values: string[]; boolean: boolean; state?: VariantState }
+type StateKind = 'rest' | 'hover' | 'active' | 'focus' | 'disabled';
+interface VariantState { kinds: ReadonlyMap<string, StateKind>; disabled?: string }
+
+/** 상태 값 이름. active는 탭의 '선택됨'으로도 쓰여 넣지 않는다. */
+const STATE_KINDS: Record<string, StateKind> = {
+  default: 'rest', normal: 'rest', rest: 'rest', enabled: 'rest', idle: 'rest', static: 'rest',
+  hover: 'hover', hovered: 'hover', mouseover: 'hover', pressed: 'active', press: 'active', clicked: 'active',
+  focus: 'focus', focused: 'focus', focusvisible: 'focus', disabled: 'disabled', inactive: 'disabled'
+};
+const STATE_ORDER: Record<StateKind, number> = { rest: 0, hover: 1, focus: 2, active: 3, disabled: 4 };
+
+/** 값이 모두 상태 이름이고 쉬는 상태와 다른 상태가 함께 있으면 상태 속성이다. */
+function variantState(values: readonly string[]): VariantState | undefined {
+  const kinds = new Map(values.map((value) => [value, STATE_KINDS[value.toLowerCase().replace(/[\s_-]+/g, '')]] as const));
+  if ([...kinds.values()].some((kind) => !kind)) return undefined;
+  const found = new Set(kinds.values());
+  if (!found.has('rest') || found.size < 2) return undefined;
+  return { kinds: kinds as Map<string, StateKind>, disabled: values.find((value) => kinds.get(value) === 'disabled') };
+}
+
+function stateKind(plan: ComponentPlan, member: Component): StateKind {
+  const item = plan.variantProps.find((prop) => prop.state);
+  return item ? item.state!.kinds.get(member.variant?.[item.key] ?? '') ?? 'rest' : 'rest';
+}
+
 /** 출력할 컴포넌트 하나(variant 세트면 세트 전체)의 이름과 props 구성. */
 interface ComponentPlan {
   name: string;
@@ -272,7 +303,7 @@ interface ComponentPlan {
   textKeys: Map<string, string>;
   /** 컴포넌트 속성 id → prop 이름·종류·기본값. 텍스트 속성은 문자열 prop, 불리언 속성은 조건부 렌더 prop이 된다. */
   componentProps: Map<string, { prop: string; type: 'text' | 'boolean'; defaultValue: string | boolean }>;
-  variantProps: Array<{ key: string; prop: string; values: string[]; boolean: boolean }>;
+  variantProps: VariantProp[];
   code: string[];
   owner: Owner;
   /** 컴포넌트 루트의 HTML 태그. 반복 항목에 role="listitem"을 줄 수 있는지(div일 때만) 볼 때 쓴다. */
@@ -283,7 +314,83 @@ interface ComponentPlan {
 interface Owner { name: string; uses: Set<string>; images: Set<string>; usesId: boolean }
 
 /** 렌더 한 번의 결과. rules는 아직 파일 규칙(state.rules)에 붙이지 않은 이 렌더의 CSS 규칙이다. */
-interface Rendered { body: string[]; usesId: boolean; rules: CssRule[]; rootTag?: string }
+interface Rendered { body: string[]; usesId: boolean; rules: CssRule[]; rootTag?: string; api?: ScreenApi }
+
+/**
+ * 화면 컴포넌트가 밖에 여는 prop. 프로토타입의 화면 이동은 onNavigate(프레임 이름), 오버레이는 open과 onOpenChange, 뒤로는 onBack이다.
+ * 입력란은 값 prop과 바뀜 콜백(emailValue, onEmailChange)을 받는다. names는 겹치지 않게 이미 쓴 prop 이름이다.
+ */
+interface ScreenApi { navigate: boolean; overlay: boolean; back: boolean; controls: Array<{ value: string; change: string }>; names: Set<string> }
+
+function screenApiProps(api: ScreenApi): Array<{ name: string; type: string }> {
+  return [
+    ...(api.navigate ? [{ name: 'onNavigate', type: '(screen: string) => void' }] : []),
+    ...(api.overlay ? [{ name: 'open', type: 'boolean' }, { name: 'onOpenChange', type: '(open: boolean, overlay: string) => void' }] : []),
+    ...(api.back ? [{ name: 'onBack', type: '() => void' }] : []),
+    ...api.controls.flatMap((control) => [{ name: control.value, type: 'string' }, { name: control.change, type: '(value: string) => void' }])
+  ];
+}
+
+/** 누르면 일어나는 프로토타입 동작. 마우스 올리기·시간 지남 연결은 코드로 내지 않는다. */
+function clickAction(node: DesignNode): InteractionAction | undefined {
+  return node.interactions?.find((item) => item.trigger === 'click')?.action;
+}
+
+/** 연결이 있는 도형의 역할. 화면 이동·URL은 링크, 오버레이·뒤로는 버튼이다. 이름이나 퍼블리셔가 정한 역할이 있으면 그것을 따른다. */
+function clickRole(node: DesignNode): LayerRole | undefined {
+  const action = clickAction(node);
+  if (!action || node.role || hasRole(node, 'button') || hasRole(node, 'link')) return undefined;
+  return action.type === 'navigate' || action.type === 'open-url' ? 'link' : 'button';
+}
+
+function frameName(context: RenderContext, id: string | undefined): string {
+  for (const page of context.state.doc.pages) if (id && page.objects[id]) return page.objects[id]!.name;
+  return context.page.objects[context.rootId]?.name ?? '';
+}
+
+/** 연결의 클릭 처리 속성. a 요소의 URL 연결은 href가 된다. 쓴 화면 prop을 api에 표시한다. */
+function clickAttrs(context: RenderContext, node: DesignNode, tag: string): string[] {
+  const action = clickAction(node);
+  const api = context.api;
+  if (!action || !api) return [];
+  switch (action.type) {
+    case 'navigate':
+      api.navigate = true;
+      return [`onClick={(event) => { event.preventDefault(); onNavigate?.(${JSON.stringify(frameName(context, action.destination))}); }}`];
+    case 'open-url': {
+      // 파일에서 온 주소라 http·https만 코드에 쓴다(javascript: 등은 버린다).
+      const url = safeUrl(action.url);
+      if (!url) return [];
+      return tag === 'a' ? [`href=${JSON.stringify(url)}`, 'target="_blank"', 'rel="noreferrer"'] : [`onClick={() => window.open(${JSON.stringify(url)}, '_blank', 'noreferrer')}`];
+    }
+    case 'open-overlay':
+    case 'toggle-overlay': {
+      api.overlay = true;
+      const next = action.type === 'toggle-overlay' ? '!open' : 'true';
+      return ['aria-haspopup="dialog"', 'aria-expanded={open ?? false}', `onClick={() => onOpenChange?.(${next}, ${JSON.stringify(frameName(context, action.destination))})}`];
+    }
+    case 'close-overlay':
+      api.overlay = true;
+      return [`onClick={() => onOpenChange?.(false, ${JSON.stringify(frameName(context, action.destination))})}`];
+    case 'back':
+      api.back = true;
+      return ['onClick={() => onBack?.()}'];
+  }
+}
+
+const CONTROL_WORDS = new Set(['placeholder', 'text', 'input', 'label', 'value', 'field', 'textfield', 'textbox', 'hint']);
+
+/** 화면 입력란의 값·콜백 prop 이름. 레이어 이름(뜻이 없으면 placeholder 글자)에서 짓는다. */
+function controlProps(context: RenderContext, node: DesignNode): { value: string; change: string } {
+  const api = context.api!;
+  // 'Placeholder', 'Password Input'처럼 입력란 일반 단어는 빼고, 남는 것이 없으면 placeholder 글자로 짓는다.
+  const words = (meaningfulName(node) ? node.name : '').split(/[^A-Za-z0-9]+/).filter((word) => word && !CONTROL_WORDS.has(word.toLowerCase()));
+  const base = identifier(words.join(' ') || node.text || 'Field');
+  const unique = (name: string): string => { let next = name; for (let n = 2; api.names.has(next); n++) next = `${name}${n}`; api.names.add(next); return next; };
+  const control = { value: unique(`${base[0]!.toLowerCase()}${base.slice(1)}Value`), change: unique(`on${base}Change`) };
+  api.controls.push(control);
+  return control;
+}
 
 /**
  * 파일 하나를 만드는 동안의 상태. rules는 CSS 규칙을 쓸 순서대로 모은다(컴포넌트 규칙이 그것을 쓰는 쪽보다 앞).
@@ -379,6 +486,9 @@ interface RenderContext {
   /** 클래스 이름이 겹치지 않게 모으는 곳. variant를 합쳐 보는 시험 렌더는 따로 쓴다. */
   classes: Set<string>;
   owner: Owner;
+  disabledProp?: string;
+  /** 화면 렌더에서만 있다. 프로토타입 연결과 입력란이 쓰는 화면 prop을 모은다. */
+  api?: ScreenApi;
   /** 루트 요소에 더 붙일 속성(합친 variant의 data-* 속성). */
   rootAttrs: string[];
   rootTag?: string;
@@ -476,6 +586,8 @@ function illustrationElement(node: DesignNode, context: RenderContext): Element 
 
 /** 도형에 맞는 HTML 요소. input 이름 컨테이너를 만나면 그 안의 첫 텍스트를 입력창으로 예약한다. */
 function elementOf(node: DesignNode, phrasing: boolean, context: RenderContext): Element {
+  const linked = context.api && node.id !== context.rootId ? clickRole(node) : undefined;
+  if (linked) node = { ...node, role: linked };
   if (node.type === 'text') return textOf(node, phrasing, context);
   if (node.path || node.type === 'vector') return { tag: 'svg', attrs: [], reset: {}, phrasing: true };
   if (context.state.illustrations.has(node.id)) return illustrationElement(node, context);
@@ -552,18 +664,12 @@ function stackOnNarrow(node: DesignNode, style: Style, context: RenderContext): 
   return Object.keys(narrow).length ? narrow : null;
 }
 
-/** 도형의 CSS 규칙을 만든다. 요소 초기화 스타일 위에 도형 스타일을 덮고, 글자 스타일과 토큰 값은 변수로 바꾼다. */
-function addRule(context: RenderContext, className: string, node: DesignNode, parent: DesignNode | null, element: Element, extra: Style = {}): void {
-  const { state } = context;
-  const root = node.id === context.rootId;
-  const hints: StyleHints = { fluid: root && context.fluid, control: element.tag === 'input' || element.tag === 'textarea', flowParent: Boolean(parent && state.flow.inferred.has(parent.id)), asset: (id) => {
-    if (!state.hasAsset(id)) { state.missing.add(id); return null; }
-    state.assets.add(id);
-    return state.assetFile(id);
-  } };
-  const style: Style = { ...element.reset, ...styleFor(node, parent, hints), ...extra };
-  // 흐름 배치(inferFlow)에서 gap 하나로 못 맞춘 간격과 교차축 들여쓰기. 디자인 폭에서 원래 자리와 같게 한다.
-  // 가로 margin은 부모 안쪽 폭에 대한 %로 낸다. 디자인 폭에서는 px과 같고, 태블릿 폭처럼 화면이 줄면 함께 줄어 요소를 밀어내지 않는다.
+/**
+ * 흐름 배치(inferFlow)에서 gap 하나로 못 맞춘 간격과 교차축 들여쓰기, 겹침 순서, 가로 줄의 줄어듦. 디자인 폭에서 원래 자리와 같게 한다.
+ * 가로 margin은 부모 안쪽 폭에 대한 %로 낸다. 디자인 폭에서는 px과 같고, 태블릿 폭처럼 화면이 줄면 함께 줄어 요소를 밀어내지 않는다.
+ * 도형 규칙(addRule)과 인스턴스 위치 규칙(usage)이 함께 쓴다.
+ */
+function flowSpacing(state: ExportState, node: DesignNode, parent: DesignNode | null, style: Style): void {
   const flowParent = parent && state.flow.inferred.has(parent.id) && parent.layout?.type === 'flex' ? parent : null;
   const margin = state.flow.margins.get(node.id);
   if (margin) {
@@ -579,6 +685,19 @@ function addRule(context: RenderContext, className: string, node: DesignNode, pa
   if (flowParent && flowParent.layout?.type === 'flex' && flowParent.layout.direction === 'row' && !node.item?.absolute) Object.assign(style, { flexShrink: 1, minWidth: 0 });
   const zIndex = state.flow.zIndex.get(node.id);
   if (zIndex !== undefined) style.zIndex = String(zIndex);
+}
+
+/** 도형의 CSS 규칙을 만든다. 요소 초기화 스타일 위에 도형 스타일을 덮고, 글자 스타일과 토큰 값은 변수로 바꾼다. */
+function addRule(context: RenderContext, className: string, node: DesignNode, parent: DesignNode | null, element: Element, extra: Style = {}): void {
+  const { state } = context;
+  const root = node.id === context.rootId;
+  const hints: StyleHints = { fluid: root && context.fluid, control: element.tag === 'input' || element.tag === 'textarea', flowParent: Boolean(parent && state.flow.inferred.has(parent.id)), asset: (id) => {
+    if (!state.hasAsset(id)) { state.missing.add(id); return null; }
+    state.assets.add(id);
+    return state.assetFile(id);
+  } };
+  const style: Style = { ...element.reset, ...styleFor(node, parent, hints), ...extra };
+  flowSpacing(state, node, parent, style);
   if (element.tag === 'img') delete style.background;
   // 일러스트 SVG에는 채우기·선·그림자·흐림·투명도·모서리 자르기가 이미 들어 있다. CSS로 한 번 더 걸지 않는다.
   if (element.assetId?.startsWith(GENERATED)) {
@@ -673,12 +792,16 @@ function renderNode(node: DesignNode, parent: DesignNode | null, depth: number, 
   const className = root ? context.block : elementClass(context, node, element);
   const masking = element.tag === 'img' || node.boolOp ? null : maskPlan(context, node);
   addRule(context, className, node, parent, element, masking?.self ? maskStyle(node, masking.self) : {});
-  const attrs = element.assetId ? [imageSource(context, element.assetId), ...element.attrs] : [...element.attrs];
+  const clicks = root ? [] : clickAttrs(context, node, element.tag);
+  // URL 연결이 있는 링크는 빈 href 대신 연결 주소를 쓴다.
+  const own = clicks.some((attr) => attr.startsWith('href=')) ? element.attrs.filter((attr) => attr !== 'href="#"') : element.attrs;
+  const attrs = [...(element.assetId ? [imageSource(context, element.assetId)] : []), ...own, ...clicks];
   const described = context.field?.described.get(node.id);
   if (described) attrs.unshift(`id={\`\${fieldId}-${described}\`}`);
   const list = !masking && isList(context, node, element);
   if (list) attrs.push('role="list"');
-  const open = [element.tag, ...openAttrs(className, root, attrs, context.rootAttrs)].join(' ');
+  const disabled = root && context.disabledProp ? [DISABLED_TAGS.has(element.tag) ? `disabled={${context.disabledProp}}` : `data-disabled={${context.disabledProp} || undefined}`] : [];
+  const open = [element.tag, ...openAttrs(className, root, attrs, [...context.rootAttrs, ...disabled])].join(' ');
   if (node.type === 'text') return [`${indent}${textJsx(node, element, open, className, context)}`];
   if (node.path || node.type === 'vector') return [`${indent}<${open} ${vectorBody(node)}</svg>`];
   const childPhrasing = phrasing || element.phrasing;
@@ -747,7 +870,10 @@ function textJsx(node: DesignNode, element: Element, open: string, className: st
   const fallback = prop ? `${prop} ?? ` : '';
   if (element.tag === 'input' || element.tag === 'textarea') {
     const valueAttr = context.field?.controlId === node.id && context.field.state.filled ? 'defaultValue' : 'placeholder';
-    return `<${open} ${valueAttr}={${fallback}${JSON.stringify(node.text ?? '')}} />`;
+    // 화면 입력란은 값 prop을 주면 제어 컴포넌트, 주지 않으면 브라우저가 값을 가진다. 어느 쪽이든 바뀐 값을 콜백으로 알린다.
+    const control = context.api ? controlProps(context, node) : undefined;
+    const controlled = control ? ` value={${control.value}} onChange={(event) => ${control.change}?.(event.target.value)}` : '';
+    return `<${open}${controlled} ${valueAttr}={${fallback}${JSON.stringify(node.text ?? '')}} />`;
   }
   const runs = node.spans?.length ? spanRuns(node, className, context) : null;
   return `<${open}>{${fallback}${runs ?? JSON.stringify(node.text ?? '')}}</${element.tag}>`;
@@ -809,8 +935,15 @@ function ensurePlan(state: ExportState, componentId: string): ComponentPlan | nu
     return next;
   };
   const keys = [...new Set(members.flatMap((member) => Object.keys(member.variant ?? {})))];
+  let stateFound = false;
   plan.variantProps = keys.map((variantKey) => {
     const values = [...new Set(members.map((member) => member.variant?.[variantKey] ?? ''))];
+    // 상태 속성은 하나만 가상 클래스로 낸다(둘째부터는 보통 variant prop).
+    const state = stateFound ? undefined : variantState(values);
+    if (state) {
+      stateFound = true;
+      return { key: variantKey, prop: state.disabled ? propName('disabled') : '', values, boolean: false, state };
+    }
     return { key: variantKey, prop: propName(variantKey), values, boolean: values.every((value) => BOOLEAN_VALUES.has(value.toLowerCase())) };
   });
   for (const member of members) {
@@ -860,6 +993,10 @@ function insideNestedInstance(page: Page, node: DesignNode, rootId: string): boo
 interface RootOptions {
   textProp: RenderContext['textProp']; owner: Owner; member?: Component; fluid?: boolean; visibleProp?: RenderContext['visibleProp'];
   block?: string; classes?: Set<string>; rootAttrs?: string[];
+  /** 상태 variant의 Disabled를 고르는 prop. 루트가 button 등이면 disabled, 아니면 data-disabled 속성이 된다. */
+  disabledProp?: string;
+  /** 화면 렌더면 이미 쓴 prop 이름(글자 prop). 연결·입력란 prop을 이 이름들과 겹치지 않게 짓는다. */
+  screenProps?: readonly string[];
 }
 
 /** 루트 하나를 렌더한다. 만든 CSS 규칙은 돌려주기만 하고 파일 규칙에 붙이는 것은 부른 쪽이 정한다(합칠 수 있는지 보고 나서). */
@@ -875,10 +1012,11 @@ function renderRoot(state: ExportState, page: Page, root: DesignNode, blockName:
     rootRoleName: options.member?.name, component: Boolean(options.member), fluid: Boolean(options.fluid), usesId: false, headings,
     field,
     choice: options.member ? planChoice(page, root, options.member.name, variant) : undefined,
-    classes, owner: options.owner, rootAttrs: options.rootAttrs ?? [], toggled: new Set()
+    classes, owner: options.owner, rootAttrs: options.rootAttrs ?? [], toggled: new Set(), disabledProp: options.disabledProp,
+    api: options.screenProps ? { navigate: false, overlay: false, back: false, controls: [], names: new Set([...options.screenProps, ...LOCAL_NAMES, 'onNavigate', 'open', 'onOpenChange', 'onBack']) } : undefined
   };
   const body = renderNode(root, null, 2, context);
-  return { body, usesId: context.usesId, rules: context.rules.map((rule) => ({ ...rule, owner: options.owner.name })), rootTag: context.rootTag };
+  return { body, usesId: context.usesId, rules: context.rules.map((rule) => ({ ...rule, owner: options.owner.name })), rootTag: context.rootTag, api: context.api };
 }
 
 /** 렌더 결과를 파일에 반영한다(CSS 규칙, useId 사용). */
@@ -899,7 +1037,7 @@ function functionLines(signature: string, names: string[], rendered: Rendered): 
 
 /** 컴포넌트가 정의한 prop 이름 전부(구조 분해와 HTML 속성 타입에서 뺄 이름). */
 function planPropNames(plan: ComponentPlan): string[] {
-  return [...plan.variantProps.map((item) => item.prop), ...[...plan.componentProps.values()].map((item) => item.prop), ...plan.textProps.values()];
+  return [...plan.variantProps.filter((item) => item.prop).map((item) => item.prop), ...[...plan.componentProps.values()].map((item) => item.prop), ...plan.textProps.values()];
 }
 
 /** Props 타입. 직접 정의한 prop 외에 HTML 속성(onClick, id, aria-*, data-* 등)을 받는다. 같은 이름의 HTML 속성은 정의한 prop이 이긴다. */
@@ -910,7 +1048,7 @@ function propsInterface(name: string, names: string[], lines: string[]): string[
 
 function componentCode(state: ExportState, plan: ComponentPlan): string[] {
   const props = [
-    ...plan.variantProps.map((item) => `  ${item.prop}?: ${item.boolean ? 'boolean' : item.values.map((value) => JSON.stringify(value)).join(' | ')};`),
+    ...plan.variantProps.filter((item) => item.prop).map((item) => `  ${item.prop}?: ${item.boolean || item.state ? 'boolean' : item.values.map((value) => JSON.stringify(value)).join(' | ')};`),
     ...[...plan.componentProps.values()].map((item) => `  ${item.prop}?: ${item.type === 'boolean' ? 'boolean' : 'string'};`),
     ...[...plan.textProps.values()].map((prop) => `  ${prop}?: string;`)
   ];
@@ -955,19 +1093,36 @@ function renderMember(state: ExportState, plan: ComponentPlan, member: Component
     const bound = node.propRefs?.visible ? plan.componentProps.get(node.propRefs.visible) : undefined;
     return bound?.type === 'boolean' && propOwnerId(main.page, node) === main.node.id ? { prop: bound.prop, defaultValue: bound.defaultValue === true } : undefined;
   };
-  return renderRoot(state, main.page, main.node, options.fn, { member, textProp, visibleProp, owner: plan.owner, block: options.block, classes: options.classes, rootAttrs: options.rootAttrs });
+  const disabledProp = plan.variantProps.find((item) => item.state?.disabled)?.prop;
+  return renderRoot(state, main.page, main.node, options.fn, { member, textProp, visibleProp, owner: plan.owner, block: options.block, classes: options.classes, rootAttrs: options.rootAttrs, disabledProp });
 }
 
-/** variant 값을 루트 data 속성 선택자로. 값은 화면에 쓰는 글자 그대로이고 불리언은 true·false다. */
-function variantSelector(plan: ComponentPlan, member: Component): string {
-  return plan.variantProps.map((item) => {
+/**
+ * variant 하나를 고르는 루트 선택자. 보통 속성은 data 속성으로 :where 안에 두어 우선순위를 올리지 않고,
+ * 상태 속성은 가상 클래스로 뒤에 붙인다(상태가 같은 variant의 기본 규칙을 이긴다). 누를 수 없는 상태에서는 hover 등이 걸리지 않는다.
+ */
+function variantScope(plan: ComponentPlan, member: Component, block: string, rootTag: string | undefined): string {
+  const attrs = plan.variantProps.filter((item) => !item.state).map((item) => {
     const raw = member.variant?.[item.key] ?? '';
     return `[data-${kebab(item.prop)}=${JSON.stringify(item.boolean ? raw.toLowerCase() : raw)}]`;
   }).join('');
+  const state = plan.variantProps.find((item) => item.state)?.state;
+  const off = DISABLED_TAGS.has(rootTag ?? '') ? ':disabled' : '[data-disabled]';
+  const kind = stateKind(plan, member);
+  const pseudo = { rest: '', hover: ':hover', focus: ':focus-visible', active: ':active', disabled: off }[kind];
+  const guard = kind !== 'rest' && kind !== 'disabled' && state?.disabled ? `:not(${off})` : '';
+  return `.${block}${attrs ? `:where(${attrs})` : ''}${pseudo}${guard}`;
 }
+
+/** disabled 속성을 쓰는 태그. 다른 태그의 컴포넌트 루트는 data-disabled로 상태를 낸다. */
+const DISABLED_TAGS = new Set(['button', 'input', 'select', 'textarea', 'fieldset']);
 
 /** variant prop의 현재 값 식. 값이 없으면 세트 첫 variant의 값이다. ref는 prop을 읽는 식(props.size 또는 size)이다. */
 function variantValue(plan: ComponentPlan, item: ComponentPlan['variantProps'][number], ref: (prop: string) => string): string {
+  if (item.state) {
+    const rest = item.values.find((value) => item.state!.kinds.get(value) === 'rest')!;
+    return item.state.disabled ? `(${ref(item.prop)} ? ${JSON.stringify(item.state.disabled)} : ${JSON.stringify(rest)} as string)` : `(${JSON.stringify(rest)} as string)`;
+  }
   const fallback = plan.members[0]!.variant?.[item.key] ?? '';
   return `(${ref(item.prop)} ?? ${item.boolean ? fallback.toLowerCase() === 'true' : JSON.stringify(fallback)})`;
 }
@@ -984,6 +1139,7 @@ function setCondition(plan: ComponentPlan, chosen: readonly Component[], univers
   const exact = universe.every((member) => chosen.includes(member) === narrowing.every(({ item, values }) => values.includes(valueOf(member, item.key))));
   if (exact) {
     return narrowing.map(({ item, values }) => {
+      if (item.state) return stateTest(item, values, ref);
       const current = variantValue(plan, item, ref);
       if (item.boolean) return `${current} === ${values[0]!.toLowerCase() === 'true'}`;
       return values.length === 1 ? `${current} === ${JSON.stringify(values[0])}` : `[${values.map((value) => JSON.stringify(value)).join(', ')}].includes(${current.slice(1, -1)})`;
@@ -991,8 +1147,22 @@ function setCondition(plan: ComponentPlan, chosen: readonly Component[], univers
   }
   return chosen.map((member) => `(${plan.variantProps.map((item) => {
     const value = valueOf(member, item.key);
+    if (item.state) return stateTest(item, [value], ref);
     return `${variantValue(plan, item, ref)} === ${item.boolean ? value.toLowerCase() === 'true' : JSON.stringify(value)}`;
   }).join(' && ') || 'true'})`).join(' || ');
+}
+
+/**
+ * 상태 속성 값 목록을 고르는 조건식. props로 고를 수 있는 것은 disabled뿐이라, hover 등은 쉬는 상태와 같이 본다
+ * (그 모양은 가상 클래스가 낸다). 고를 수 없는 값만 든 목록은 거짓이다.
+ */
+function stateTest(item: VariantProp, values: readonly string[], ref: (prop: string) => string): string {
+  const kinds = values.map((value) => item.state!.kinds.get(value));
+  const off = kinds.includes('disabled');
+  const on = kinds.includes('rest');
+  if (!item.prop) return on ? 'true' : 'false';
+  if (on && off) return 'true';
+  return on ? `!${ref(item.prop)}` : off ? `Boolean(${ref(item.prop)})` : 'false';
 }
 
 /** 기준 스타일과 다른 선언만. 기준에만 있는 선언은 unset으로 지운다. */
@@ -1047,7 +1217,7 @@ function groupLabel(plan: ComponentPlan, members: readonly Component[]): string 
 
 /** 루트 data 속성(합친 variant의 CSS가 고르는 값). */
 function variantAttrs(plan: ComponentPlan): string[] {
-  return plan.variantProps.map((item) => {
+  return plan.variantProps.filter((item) => !item.state).map((item) => {
     const current = variantValue(plan, item, (prop) => prop);
     const inner = current.slice(1, -1);
     return `data-${kebab(item.prop)}={${item.boolean ? `String(${inner})` : inner}}`;
@@ -1073,7 +1243,9 @@ function renderTrial(state: ExportState, plan: ComponentPlan, members: readonly 
  * 구조가 같은 variant들을 함수 하나로 합친다. 첫 variant의 규칙이 기본이고, 나머지는 다른 선언만 `.블록:where([data-…])` 아래에 낸다.
  * :where는 우선순위를 올리지 않아 인스턴스 위치 클래스가 계속 이긴다. 상태 속성(disabled 등)은 variant 조건식이 된다.
  */
-function mergeGroup(state: ExportState, plan: ComponentPlan, members: readonly Component[], fn: string): Rendered | null {
+function mergeGroup(state: ExportState, plan: ComponentPlan, group: readonly Component[], fn: string): Rendered | null {
+  // 쉬는 상태가 기본 규칙이 되고, 가상 클래스 규칙은 hover → focus → 누름 → 누를 수 없음 순서로 뒤에 온다(뒤의 것이 이긴다).
+  const members = [...group].sort((a, b) => STATE_ORDER[stateKind(plan, a)] - STATE_ORDER[stateKind(plan, b)]);
   const trials = renderTrial(state, plan, members, kebab(fn));
   const head = trials?.[0];
   if (!trials || !head || trials.some((trial) => structureOf(trial.rendered) !== structureOf(head.rendered))) return null;
@@ -1081,7 +1253,7 @@ function mergeGroup(state: ExportState, plan: ComponentPlan, members: readonly C
   const body = head.rendered.body.map((line, index) => mergeFlags(plan, members, trials.map((trial) => trial.rendered.body[index] ?? ''), line));
   const rules = [...head.rendered.rules];
   for (const trial of trials.slice(1)) {
-    const scope = `.${head.block}:where(${variantSelector(plan, trial.member)})`;
+    const scope = variantScope(plan, trial.member, head.block, head.rendered.rootTag);
     trial.rendered.rules.forEach((rule, index) => {
       const diff = styleDiff(head.rendered.rules[index]!.style, rule.style);
       if (Object.keys(diff).length === 0) return;
@@ -1118,15 +1290,22 @@ function usage(context: RenderContext, node: DesignNode, parent: DesignNode | nu
   if (!component || !plan) return `{/* 컴포넌트 ${node.componentId ?? ''} 없음 */}`;
   if (plan.owner !== context.owner) context.owner.uses.add(plan.name);
   const className = uniqueIn(context.classes, `${context.block}__${meaningfulName(node) ?? kebab(plan.name)}`);
-  const style = placement(node, parent);
+  const style = placement(node, parent, { flowParent: Boolean(parent && state.flow.inferred.has(parent.id)) });
+  flowSpacing(state, node, parent, style);
   context.rules.push({ selector: `.${className}`, style, keepOrder: true });
+  // 좁은 화면에서는 다른 흐름 요소처럼 들여쓰기를 지운다.
+  const margin = state.flow.margins.get(node.id);
+  if (margin && ((margin.axis === 'row' && margin.main) || (margin.axis === 'column' && margin.cross))) context.rules.push({ selector: `.${className}`, style: { marginLeft: 0, ...(typeof style.maxWidth === 'string' ? { maxWidth: '100%' } : {}) }, media: NARROW_MEDIA, keepOrder: true });
   // 컴포넌트 루트의 좁은 화면 규칙(오토 레이아웃 높이 풀기)은 컴포넌트 CSS 파일에 있다. 파일을 나누면 뒤에 붙는 이 파일의 위치 규칙 높이가
   // 그것을 이기므로, 같은 규칙을 위치 클래스에도 둔다(한 파일로 낼 때와 같은 결과).
   const main = mainOf(state.doc, component);
   if (typeof style.height === 'number' && main?.node.layout) context.rules.push({ selector: `.${className}`, style: { height: 'auto', minHeight: round(main.node.height) }, media: NARROW_MEDIA });
-  const attrs = [`className="${className}"`, ...(listItem ? ['role="listitem"'] : [])];
+  // 인스턴스에 건 연결은 컴포넌트 루트로 넘어가는 클릭 처리 속성이 된다(컴포넌트가 나머지 속성을 루트에 펼친다).
+  const attrs = [`className="${className}"`, ...(listItem ? ['role="listitem"'] : []), ...clickAttrs(context, node, plan.rootTag ?? 'div')];
   for (const item of plan.variantProps) {
     const value = component.variant?.[item.key];
+    // 인스턴스의 Hover·Pressed 같은 상태는 마우스가 정하므로 넘기지 않는다. Disabled만 prop이다.
+    if (item.state) { if (value !== undefined && value === item.state.disabled) attrs.push(item.prop); continue; }
     if (value !== undefined) attrs.push(item.boolean ? `${item.prop}={${value.toLowerCase() === 'true'}}` : `${item.prop}=${JSON.stringify(value)}`);
   }
   // 인스턴스가 정한 컴포넌트 속성 값을 prop으로 넘긴다.
@@ -1176,9 +1355,12 @@ export function exportTsx(doc: DesignDocument, pageId: string, selectedId: strin
   state.illustrations = findIllustrations(page, selectedId, hidden);
   const flow = inferFlow(page, selectedId, hidden, (node) => (node.id !== selectedId && Boolean(node.componentId)) || state.illustrations.has(node.id));
   state.flow = flow;
-  const rendered = commit(state, owner, renderRoot(state, flow.page, flow.page.objects[selectedId]!, name, { textProp: (node) => props.get(node.id), fluid: true, owner }));
-  const names = texts.map((node) => props.get(node.id)!);
-  const own = [...propsInterface(name, names, names.map((prop) => `  ${prop}?: string;`)), ...functionLines(`export function ${name}(props: ${name}Props)`, names, rendered)];
+  const textNames = texts.map((node) => props.get(node.id)!);
+  const rendered = commit(state, owner, renderRoot(state, flow.page, flow.page.objects[selectedId]!, name, { textProp: (node) => props.get(node.id), fluid: true, owner, screenProps: textNames }));
+  const api = rendered.api ? screenApiProps(rendered.api) : [];
+  const names = [...textNames, ...api.map((item) => item.name)];
+  const lines = [...textNames.map((prop) => `  ${prop}?: string;`), ...api.map((item) => `  ${item.name}?: ${item.type};`)];
+  const own = [...propsInterface(name, names, lines), ...functionLines(`export function ${name}(props: ${name}Props)`, names, rendered)];
   return result(state, name, { owner, code: own });
 }
 
