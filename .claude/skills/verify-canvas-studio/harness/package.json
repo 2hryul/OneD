@@ -1,0 +1,9 @@
+{
+  "name": "verify-canvas-studio-harness",
+  "private": true,
+  "type": "module",
+  "description": "Drives the Canvas Studio editor in the installed Edge/Chrome for verification. Not part of the app build.",
+  "dependencies": {
+    "playwright-core": "1.65.0"
+  }
+}

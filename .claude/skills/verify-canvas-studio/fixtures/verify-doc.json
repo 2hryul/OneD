@@ -1,0 +1,176 @@
+{
+  "version": 5,
+  "name": "VERIFY 문서",
+  "components": {},
+  "tokens": {},
+  "pages": [
+    {
+      "id": "page-1",
+      "name": "Verify page",
+      "children": [
+        "frame-1"
+      ],
+      "objects": {
+        "frame-1": {
+          "id": "frame-1",
+          "type": "frame",
+          "name": "Landing page",
+          "parentId": null,
+          "x": 120,
+          "y": 95,
+          "width": 720,
+          "height": 520,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff"
+            }
+          ],
+          "transform": [
+            1,
+            0,
+            0,
+            1,
+            0,
+            0
+          ],
+          "children": [
+            "rect-1",
+            "text-1",
+            "text-2",
+            "rect-2",
+            "text-3"
+          ]
+        },
+        "rect-1": {
+          "id": "rect-1",
+          "type": "rectangle",
+          "name": "VERIFY Card",
+          "parentId": "frame-1",
+          "x": 164,
+          "y": 150,
+          "width": 632,
+          "height": 336,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#e6ebff"
+            }
+          ],
+          "radius": 24,
+          "transform": [
+            1,
+            0,
+            0,
+            1,
+            0,
+            0
+          ]
+        },
+        "text-1": {
+          "id": "text-1",
+          "type": "text",
+          "name": "VERIFY Heading",
+          "parentId": "frame-1",
+          "x": 210,
+          "y": 218,
+          "width": 470,
+          "height": 72,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#202c65"
+            }
+          ],
+          "text": "Verify text 검증",
+          "fontSize": 42,
+          "transform": [
+            1,
+            0,
+            0,
+            1,
+            0,
+            0
+          ]
+        },
+        "text-2": {
+          "id": "text-2",
+          "type": "text",
+          "name": "Description",
+          "parentId": "frame-1",
+          "x": 210,
+          "y": 315,
+          "width": 470,
+          "height": 48,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#52618a"
+            }
+          ],
+          "text": "Shape ideas into reusable interfaces.",
+          "fontSize": 20,
+          "transform": [
+            1,
+            0,
+            0,
+            1,
+            0,
+            0
+          ]
+        },
+        "rect-2": {
+          "id": "rect-2",
+          "type": "rectangle",
+          "name": "Button",
+          "parentId": "frame-1",
+          "x": 210,
+          "y": 392,
+          "width": 164,
+          "height": 52,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#5369f8"
+            }
+          ],
+          "radius": 12,
+          "transform": [
+            1,
+            0,
+            0,
+            1,
+            0,
+            0
+          ]
+        },
+        "text-3": {
+          "id": "text-3",
+          "type": "text",
+          "name": "Button label",
+          "parentId": "frame-1",
+          "x": 238,
+          "y": 405,
+          "width": 110,
+          "height": 26,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff"
+            }
+          ],
+          "text": "Get started",
+          "fontSize": 18,
+          "transform": [
+            1,
+            0,
+            0,
+            1,
+            0,
+            0
+          ]
+        }
+      }
+    }
+  ]
+}

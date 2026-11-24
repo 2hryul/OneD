@@ -8,3 +8,4 @@ craft-project/
 *.jam
 *.tsbuildinfo
 .env
+.verify-evidence/
