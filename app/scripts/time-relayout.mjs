@@ -2,14 +2,13 @@
 // 사용법: node --experimental-strip-types scripts/time-relayout.mjs <file.fig> <node-id> [반복=30]
 import { readFileSync } from 'node:fs';
 import { performance } from 'node:perf_hooks';
-import { parseFig } from 'openfig-core';
-import { importFigNode } from '../src/figmaImport.ts';
+import { importFigNode, readFigFile } from '../src/figmaImport.ts';
 import { updateShape } from '../src/changes.ts';
 import { normalizeAfterEdit } from '../src/normalize.ts';
 
 const [filePath, rootId, runsArg] = process.argv.slice(2);
 const runs = Number(runsArg ?? 30);
-const { document } = importFigNode(parseFig(new Uint8Array(readFileSync(filePath))), rootId);
+const { document } = importFigNode(readFigFile(new Uint8Array(readFileSync(filePath))), rootId);
 const page = document.pages[0];
 const depth = (node) => { let count = 0; for (let p = node.parentId; p; p = page.objects[p]?.parentId) count++; return count; };
 const target = Object.values(page.objects).filter((node) => node.type === 'text' && page.objects[node.parentId]?.layout).sort((a, b) => depth(b) - depth(a))[0];

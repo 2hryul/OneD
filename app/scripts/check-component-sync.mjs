@@ -2,15 +2,14 @@
 // 동기화가 Figma 결과를 망가뜨리지 않는지 확인하는 용도다.
 // 사용법: node --experimental-strip-types scripts/check-component-sync.mjs <file.fig> <node-id> [허용오차px=0.5]
 import { readFileSync } from 'node:fs';
-import { parseFig } from 'openfig-core';
-import { importFigNode } from '../src/figmaImport.ts';
+import { importFigNode, readFigFile } from '../src/figmaImport.ts';
 import { parseDocument } from '../src/model.ts';
 import { applyChanges, updateShape } from '../src/changes.ts';
 import { normalizeAfterEdit } from '../src/normalize.ts';
 
 const [filePath, rootId, toleranceArg] = process.argv.slice(2);
 const tolerance = Number(toleranceArg ?? 0.5);
-const { document } = importFigNode(parseFig(new Uint8Array(readFileSync(filePath))), rootId);
+const { document } = importFigNode(readFigFile(new Uint8Array(readFileSync(filePath))), rootId);
 parseDocument(JSON.stringify(document));
 const frame = document.pages[0];
 const used = new Set(Object.values(frame.objects).filter((node) => node.componentId && !node.mainInstance).map((node) => node.componentId));

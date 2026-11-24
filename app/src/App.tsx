@@ -28,8 +28,8 @@ import { measureBetween } from './measure';
 import type { PluginHost, PluginInfo } from './pluginApi';
 import { LayersPanel, PagesPanel, PropertiesPanel, type DropPosition } from './panels';
 import { exportTsx } from './export';
-import { figmaNodeId, importFigFile, importFigNode, listFigFrames, listFigTopNodes, type FigFrameEntry, type ImportReport } from './figmaImport';
-import { parseFig, type FigDocument } from 'openfig-core';
+import { figmaNodeId, importFigFile, importFigNode, listFigFrames, listFigTopNodes, readFigFile, type FigFrameEntry, type ImportReport } from './figmaImport';
+import type { FigDocument } from 'openfig-core';
 import { base64ToBytes, bytesToBase64, contentId, getAssets, putAssets, readImageSize, referencedAssets, sniffImageMime, type AssetRecord } from './assets';
 import { ImportReportModal } from './report';
 import { AssetsPanel } from './assetsPanel';
@@ -1085,7 +1085,7 @@ export function App(): JSX.Element {
     if (collab.file) { collab.disconnect(); setNotice('공유 파일을 닫고 로컬 문서로 엽니다.'); }
     try {
       if (file.name.toLowerCase().endsWith('.fig')) {
-        const fig = parseFig(new Uint8Array(await file.arrayBuffer()));
+        const fig = readFigFile(new Uint8Array(await file.arrayBuffer()));
         const frames = listFigFrames(fig);
         // 맨 위가 도형·벡터뿐인 파일은 프레임 목록이 빈다. 그 도형들을 후보로 보여 주고 창에서 안내한다.
         const entries = frames.length ? frames : listFigTopNodes(fig);

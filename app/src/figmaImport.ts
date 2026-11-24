@@ -1,4 +1,4 @@
-import { parseFig, resolveVectorNodePaths, type FigDocument, type FigNode, type FigPaint } from 'openfig-core';
+import { parseFig, parseFigBinary, resolveVectorNodePaths, type FigDocument, type FigNode, type FigPaint } from 'openfig-core';
 import { TOKEN_SLOT_TYPE, isContainer, pageFromNodes, parseVariantName, type Component, type DesignDocument, type Layout, type Matrix, type NodeInput, type NodeType, type Page, type Token, type TokenSlot } from './model.ts';
 import { topInstanceRoot, touchedAgainstMain } from './components.ts';
 import { applyPoint, cleanMatrix, linearPart, multiply } from './geometry.ts';
@@ -44,7 +44,17 @@ export function figmaNodeId(value: string): string | null {
 }
 
 export function importFigFile(bytes: Uint8Array, rootId: string): FigImportResult {
-  return importFigNode(parseFig(bytes), rootId);
+  return importFigNode(readFigFile(bytes), rootId);
+}
+
+const FIG_KIWI = new TextEncoder().encode('fig-kiwi');
+
+/**
+ * .fig 파일을 읽는다. 지금의 로컬 복사본은 canvas.fig와 그림을 묶은 ZIP이고, 예전 파일은 ZIP 없이 canvas 데이터(fig-kiwi)만 있다.
+ * 예전 형식에는 그림이 들어 있지 않아 그림 채우기는 '이미지 없음'으로 보고된다.
+ */
+export function readFigFile(bytes: Uint8Array): FigDocument {
+  return FIG_KIWI.every((byte, index) => bytes[index] === byte) ? parseFigBinary(bytes) : parseFig(bytes);
 }
 
 /** 가져오기 창에 보여 줄 프레임(또는 맨 위 도형) 하나. page는 그 노드가 있는 페이지 이름, type은 Figma 노드 종류다. */
