@@ -23,14 +23,17 @@ Preconditions:
 
 - **실행.** PowerShell: `$env:VERIFY_FIG_FILE = 'C:\path\file.fig'; node .claude/skills/verify-canvas-studio/harness/run.mjs fig-import`. bash: `VERIFY_FIG_FILE=/c/path/file.fig node .claude/skills/verify-canvas-studio/harness/run.mjs fig-import`.
 - **열기.** 열기 버튼으로 `.fig`를 넣으면 `.import-modal`이 뜨고 프레임 목록이 1개 이상.
-- **고르기.** `VERIFY_FIG_NODE`가 있으면 입력란에 넣고, 없으면 첫 프레임을 고른다. 스크린샷 `01-fig-modal.png`.
-- **가져오기.** 가져오기를 누르면 창이 닫히고 상태 표시줄에 요약(`개 요소 · 인스턴스 … override`)이 뜨며 레이어 수가 바뀐다. 보고서 창이 뜨면 `02-import-report.png`.
-- **저장된 값.** 자동 저장본이 1,000자를 넘는 문서로 바뀐다.
+- **고르기.** `VERIFY_FIG_NODE`가 있으면 입력란에 넣고(이때는 목록이 비어도 된다), 없으면 첫 프레임을 고른다. 스크린샷 `01-fig-modal.png`.
+- **가져오기.** 가져오기를 누르면 창이 닫히고 상태 표시줄에 요약(`개 요소 · 인스턴스 … override`)이 뜨며, 레이어 수와 `문서 이름`(`<노드 이름> (<node-id>)`)이 바뀐다. 보고서 창이 뜨면 `02-import-report.png`.
+- **저장된 값.** 자동 저장본의 `name`이 가져온 문서 이름과 같다(그림은 IndexedDB로 가므로 저장본 길이로는 판단하지 않는다).
 - **증거.** 스크린샷, `summary.json`.
 
 ## Gotchas
 
-- **원본 `.fig`는 저장소에 없다**(`.gitignore`가 `*.fig` 제외, 사용자 디자인 데이터). `VERIFY_FIG_FILE`이 없으면 이 여정은 이유와 함께 `FAIL`이고, `all`은 이 여정을 빼고 돈다. 2026-11-24 스킬을 만들 때는 파일이 없어 이 여정을 끝까지 돌리지 못했다.
+- **원본 `.fig`는 저장소에 없다**(`.gitignore`가 `*.fig` 제외, 사용자 디자인 데이터). `VERIFY_FIG_FILE`이 없으면 이 여정은 이유와 함께 `FAIL`이고, `all`은 이 여정을 빼고 돈다.
+- 공개 샘플은 파서 저장소 `OpenFig-org/openfig-core`의 `test-fixtures/`에 있다(라이선스 파일 없음, 저장소 밖에 받아 로컬 시험에만 쓴다). 2026-11-24 확인: `OpenFigs.fig`(48KB, 프레임 1개) PASS, `vector-network/coloradjusted.fig`(2.2MB)는 페이지 맨 위가 프레임이 아닌 `ROUNDED_RECTANGLE`(id `1:2`, 그림 채우기)뿐이라 목록이 비어 node-id 없이는 `FAIL`이 맞고, `VERIFY_FIG_NODE=1:2`로 PASS.
+- 목록은 페이지 맨 위(또는 SECTION 안)의 FRAME·COMPONENT·INSTANCE·GROUP 등만 보여 준다. 맨 위가 도형·벡터뿐인 파일은 목록이 비고 안내 문구도 없다. node-id를 넣어야 한다.
+- 그림 채우기의 색 보정(`paintFilter`: 노출·대비·채도 등)은 가져오지 않고, 보고서에도 항목이 생기지 않는다. 색 보정이 든 파일은 원본보다 보정 전 사진처럼 보인다.
 - `.fig`와 그 스크린샷은 사용자 디자인이다. 증거 폴더(`.verify-evidence/`, Git 제외) 밖으로 복사하거나 커밋하지 않는다.
 - 큰 파일(50MB, 2만 노드)은 해석에 수십 초 걸릴 수 있다. 창 대기 60초, 가져오기 대기 120초다.
 - 가져온 문서가 크면 localStorage 한도를 넘어 `자동 저장 공간이 부족합니다…`가 뜰 수 있다. 그때 `fig-autosave` 확인은 실패해야 맞다.

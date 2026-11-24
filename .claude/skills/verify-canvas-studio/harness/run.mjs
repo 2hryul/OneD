@@ -134,13 +134,16 @@ const journeys = {
   async 'fig-import'(page, ev) {
     const fig = process.env.VERIFY_FIG_FILE;
     if (!fig || !existsSync(fig)) { ev.fail('VERIFY_FIG_FILE에 있는 .fig 파일', fig ?? '(설정 안 됨) — 원본 .fig는 저장소에 없다. 경로를 환경 변수로 주고 다시 실행.'); return; }
+    const layers = (text) => Number(/(\d+) layers/.exec(text)?.[1] ?? NaN);
     const before = await status(page);
+    const beforeName = await docName(page);
     await openViaButton(page, fig);
     const modal = page.locator('.import-modal', { hasText: 'Figma 프레임 가져오기' });
     await modal.waitFor({ timeout: 60_000 });
     const options = await modal.locator('select option').evaluateAll((list) => list.map((o) => ({ value: o.value, text: o.textContent })).filter((o) => o.value));
-    ev.check('가져오기 창에 프레임 목록', options.length > 0, `${options.length}개`);
     const node = process.env.VERIFY_FIG_NODE;
+    // node-id를 직접 넣는 경우 목록은 필요 없다(맨 위에 프레임이 없는 파일도 node-id로는 가져올 수 있다).
+    ev.check('가져오기 창에 프레임 목록', options.length > 0 || Boolean(node), node ? `${options.length}개 · node-id ${node} 직접 입력` : `${options.length}개`);
     if (node) await modal.locator('input').fill(node);
     else if (options.length) await modal.locator('select').selectOption(options[0].value);
     await ev.shot('fig-modal');
@@ -149,11 +152,18 @@ const journeys = {
     const after = await status(page);
     ev.check('가져오기 창이 닫힘', !(await modal.isVisible()));
     ev.check('상태 표시줄에 가져오기 요약(요소·override)', /개 요소 · 인스턴스 .*override/.test(after), after);
-    ev.check('레이어 수가 바뀜', before !== after);
+    // 상태 표시줄 글 전체가 아니라 레이어 수와 문서 이름을 본다(알림만 바뀌어도 통과하던 거짓 양성 방지).
+    const afterName = await docName(page);
+    ev.check('레이어 수·문서 이름이 바뀜', layers(after) > 0 && (layers(after) !== layers(before) || afterName !== beforeName) && afterName !== beforeName, `${layers(before)} → ${layers(after)} layers · "${beforeName}" → "${afterName}"`);
     const report = page.locator('.report-modal');
     if (await report.isVisible().catch(() => false)) await ev.shot('import-report');
-    const saved = await readAutosave(page);
-    ev.check('가져온 문서가 자동 저장소에 들어감', Boolean(saved) && saved.length > 1000, saved ? `${saved.length}자` : null);
+    // 그림은 IndexedDB로 가므로 길이로는 판단할 수 없다. 저장본의 문서 이름이 가져온 문서인지 본다.
+    let savedName = null;
+    for (let tries = 0; tries < 20 && savedName !== afterName; tries++) {
+      try { savedName = JSON.parse((await readAutosave(page)) ?? 'null')?.name ?? null; } catch { savedName = null; }
+      if (savedName !== afterName) await page.waitForTimeout(250);
+    }
+    ev.check('가져온 문서가 자동 저장소에 들어감', savedName === afterName && savedName !== beforeName, `저장본 이름 "${savedName}"`);
     await ev.shot('after-import');
   }
 };
