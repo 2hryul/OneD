@@ -190,6 +190,7 @@
 .plugin-approve footer{display:flex;justify-content:flex-end;gap:8px}
 /* 도형 안 SVG는 줄 기준선에 놓이지 않게 한다(인라인이면 작은 벡터가 아래로 밀려 부모 프레임에서 잘린다). */
 .design-node>svg{display:block}
+.design-node>.fill-layer{position:absolute;inset:0;border-radius:inherit;pointer-events:none}
 .align-bar{display:flex;align-items:center;gap:2px;padding:8px 10px;border-bottom:1px solid #343a46}
 .align-bar button{width:26px;height:26px;border:0;border-radius:5px;background:transparent;color:#c5ccdb;font-size:14px}
 .align-bar button:hover:not(:disabled){background:#343a48;color:#fff}

@@ -1,5 +1,6 @@
 import type { DesignNode, Page } from './model';
 import type { Style } from './exportCss';
+import { adjustedImageFill } from './styleCss';
 
 /**
  * 도형 하나를 어떤 HTML 요소로 낼지. phrasing은 자식이 문장 요소(span)만 와야 하는지다
@@ -94,10 +95,13 @@ export function selectBox(state: ControlState): Element {
   return { tag: 'button', attrs: ['type="button"', 'id={fieldId}', 'aria-haspopup="listbox"', ...stateAttrs(state, 'select')], reset: BUTTON_RESET, phrasing: true };
 }
 
-/** 그림 하나만 채운 사각형은 alt가 있는 img로 낸다. 바둑판(tile) 채우기는 배경으로 둔다. */
+/**
+ * 그림 하나만 채운 사각형은 alt가 있는 img로 낸다. 바둑판(tile) 채우기는 배경으로 둔다.
+ * 색 보정한 그림도 img로 내지 않는다. img에 filter를 걸면 선·그림자까지 보정되므로 ::before 겹에 그린다(addRule).
+ */
 function imageOnly(node: DesignNode): Extract<DesignNode['fills'][number], { type: 'image' }> | null {
   const paint = node.fills.length === 1 ? node.fills[0]! : null;
-  return node.type === 'rectangle' && !node.children?.length && paint?.type === 'image' && paint.fit !== 'tile' ? paint : null;
+  return node.type === 'rectangle' && !node.children?.length && paint?.type === 'image' && paint.fit !== 'tile' && !adjustedImageFill(node) ? paint : null;
 }
 
 /**
@@ -108,6 +112,12 @@ function imageOnly(node: DesignNode): Extract<DesignNode['fills'][number], { typ
 export function boxElement(node: DesignNode, phrasing: boolean, text: { any: boolean; input: boolean; label?: string }): Element {
   const image = imageOnly(node);
   if (image) return { tag: 'img', attrs: [`alt=${JSON.stringify(altText(node.name))}`], reset: { display: 'block', objectFit: FIT[image.fit] ?? 'cover' }, phrasing: true, assetId: image.assetId };
+  if (node.type === 'rectangle' && adjustedImageFill(node)) {
+    // img 대신 낸 색 보정 그림. 설명이 있는 이름이면 그림 역할과 이름을 붙인다(빈 alt와 같은 장식 그림이면 붙이지 않음).
+    const alt = altText(node.name);
+    const attrs = alt ? ['role="img"', `aria-label=${JSON.stringify(alt)}`] : [];
+    return phrasing ? { tag: 'span', attrs, reset: { display: 'block' }, phrasing: true } : { tag: 'div', attrs, reset: {}, phrasing: false };
+  }
   if (phrasing) return { tag: 'span', attrs: [], reset: { display: 'block' }, phrasing: true };
   if (hasRole(node, 'button')) return { tag: 'button', attrs: ['type="button"', ...(text.any ? [] : [`aria-label=${JSON.stringify(text.label ?? cleanName(node.name))}`])], reset: BUTTON_RESET, phrasing: true };
   if (hasRole(node, 'input') && text.input) return { tag: 'label', attrs: [], reset: { display: 'block', cursor: 'text' }, phrasing: true };

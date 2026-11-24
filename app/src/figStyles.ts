@@ -41,19 +41,20 @@ function issue(sink: StyleSink, node: FigNode, nodeId: string, kind: string, det
  */
 export function figPaints(sink: StyleSink, node: FigNode, nodeId: string, paints: FigPaint[] | undefined): Paint[] {
   const result: Paint[] = [];
-  for (const paint of paints ?? []) {
-    if (paint.visible === false) continue;
-    const converted = figPaint(sink, node, nodeId, paint);
+  const visible = (paints ?? []).filter((paint) => paint.visible !== false);
+  for (const paint of visible) {
+    const converted = figPaint(sink, node, nodeId, paint, visible.length > 1);
     if (converted) result.push(converted);
   }
   return result;
 }
 
-function figPaint(sink: StyleSink, node: FigNode, nodeId: string, paint: FigPaint): Paint | null {
+/** layered는 이 채우기가 여러 겹 중 하나인지(그림 색 보정을 DOM·React에서 표현할 수 있는지 판단에 쓴다). */
+function figPaint(sink: StyleSink, node: FigNode, nodeId: string, paint: FigPaint, layered: boolean): Paint | null {
   const opacity = paint.opacity !== undefined && paint.opacity < 1 ? { opacity: paint.opacity } : {};
   if (paint.type === 'SOLID') return { type: 'solid', color: figColor(paint.color), ...opacity };
   if (paint.type === 'GRADIENT_LINEAR' || paint.type === 'GRADIENT_RADIAL') return figGradient(sink, node, nodeId, paint, opacity);
-  if (paint.type === 'IMAGE') return figImage(sink, node, nodeId, paint, opacity);
+  if (paint.type === 'IMAGE') return figImage(sink, node, nodeId, paint, opacity, layered);
   issue(sink, node, nodeId, 'paint-unsupported', `채우기 ${paint.type}`);
   return null;
 }
@@ -72,7 +73,7 @@ function figGradient(sink: StyleSink, node: FigNode, nodeId: string, paint: FigP
   return { type: 'radial', center: { x: geometry.center.x / width, y: geometry.center.y / height }, radius: { x: geometry.radiusX / width, y: geometry.radiusY / height }, stops, ...opacity };
 }
 
-function figImage(sink: StyleSink, node: FigNode, nodeId: string, paint: FigPaint, opacity: { opacity?: number }): Paint {
+function figImage(sink: StyleSink, node: FigNode, nodeId: string, paint: FigPaint, opacity: { opacity?: number }, layered: boolean): Paint {
   const id = hashHex(paint.image?.hash) ?? '';
   const bytes = id ? sink.fig.images.get(id) : undefined;
   const mime = bytes ? sniffImageMime(bytes) : null;
@@ -83,34 +84,40 @@ function figImage(sink: StyleSink, node: FigNode, nodeId: string, paint: FigPain
   if (t && (Math.abs(t.m00 - 1) > 1e-3 || Math.abs(t.m11 - 1) > 1e-3 || Math.abs(t.m02) > 1e-3 || Math.abs(t.m12) > 1e-3)) {
     issue(sink, node, nodeId, 'image-crop', `이미지 자르기·위치 변환(${mode}) 무시`);
   }
-  const adjust = imageAdjust(sink, node, nodeId, paint);
+  const adjust = imageAdjust(sink, node, nodeId, paint, layered);
   return { type: 'image', assetId: id, fit: IMAGE_FIT[mode] ?? 'fill', ...opacity, ...(adjust ? { adjust } : {}) };
 }
 
-/** Figma 그림 채우기의 색 보정(paintFilter). 값은 -1..1이고 0이 보정 없음이다. */
-type FigPaintFilter = Partial<Record<'exposure' | 'contrast' | 'saturation' | 'vibrance' | 'temperature' | 'tint' | 'highlights' | 'shadows', number>>;
+/**
+ * Figma 그림 채우기의 색 보정(paintFilter). 필드는 .fig에 든 스키마(PaintFilterMessage)를 따른다.
+ * 값은 -1..1이고 0이 보정 없음이다. 스키마에 saturation 필드는 없어 채도는 vibrance로 읽는다.
+ */
+type FigPaintFilter = Partial<Record<'exposure' | 'brightness' | 'contrast' | 'vibrance' | 'temperature' | 'tint' | 'highlights' | 'shadows' | 'detail' | 'vignette', number>>;
 
 /** CSS filter로 흉내 낼 수 없는 보정 항목과 보고서에 쓸 이름. */
-const UNSUPPORTED_FILTERS = [['temperature', '색온도'], ['tint', '틴트'], ['highlights', '하이라이트'], ['shadows', '그림자']] as const;
+const UNSUPPORTED_FILTERS = [['temperature', '색온도'], ['tint', '틴트'], ['highlights', '하이라이트'], ['shadows', '그림자'], ['detail', '디테일'], ['vignette', '비네트']] as const;
 
 /**
  * 그림 색 보정을 CSS filter 배율로 근사하고 보고서에 남긴다.
- * 노출은 사진의 노출 단계(stop)처럼 2^값 밝기로, 대비는 1+값으로, 채도·생동감(vibrance)은 둘을 곱한 saturate로 바꾼다.
- * 생동감은 원래 채도가 낮은 색만 더 올리지만 CSS에는 그런 함수가 없어 채도로 근사한다. 색온도·틴트·하이라이트·그림자는 표현하지 못한다.
+ * 노출은 사진의 노출 단계(stop)처럼 2^값, 밝기는 1+값으로 곱해 brightness로, 대비는 1+값으로, 채도(vibrance)는 1+값 saturate로 바꾼다.
+ * vibrance는 원래 채도가 낮은 색만 더 올리지만 CSS에는 그런 함수가 없어 채도로 근사한다. 나머지 항목은 표현하지 못한다.
+ * 값은 Figma 범위(-1..1)로 자른다. 손상된 파일의 큰 값이 Infinity가 되어 문서를 저장·동기화할 수 없게 되는 것을 막는다.
+ * layered(여러 겹 채우기 속 그림)면 DOM 렌더러·React 출력은 이 보정을 그리지 못한다(Canvas·SVG만 그린다).
  */
-function imageAdjust(sink: StyleSink, node: FigNode, nodeId: string, paint: FigPaint): ImageAdjust | undefined {
+function imageAdjust(sink: StyleSink, node: FigNode, nodeId: string, paint: FigPaint, layered: boolean): ImageAdjust | undefined {
   const filter = (paint as FigPaint & { paintFilter?: FigPaintFilter }).paintFilter;
   if (!filter) return undefined;
-  const value = (key: keyof FigPaintFilter): number => { const raw = filter[key]; return typeof raw === 'number' && Number.isFinite(raw) && Math.abs(raw) >= 0.005 ? raw : 0; };
+  const value = (key: keyof FigPaintFilter): number => { const raw = filter[key]; return typeof raw === 'number' && Number.isFinite(raw) && Math.abs(raw) >= 0.005 ? Math.min(1, Math.max(-1, raw)) : 0; };
   const round = (number: number): number => Math.round(number * 100) / 100;
   const adjust: ImageAdjust = {};
-  if (value('exposure')) adjust.brightness = round(2 ** value('exposure'));
-  if (value('contrast')) adjust.contrast = round(Math.max(0, 1 + value('contrast')));
-  const saturate = Math.max(0, (1 + value('saturation')) * (1 + value('vibrance')));
-  if (Math.abs(saturate - 1) >= 0.005) adjust.saturate = round(saturate);
+  const brightness = 2 ** value('exposure') * (1 + value('brightness'));
+  if (Math.abs(brightness - 1) >= 0.005) adjust.brightness = round(brightness);
+  if (value('contrast')) adjust.contrast = round(1 + value('contrast'));
+  if (value('vibrance')) adjust.saturate = round(1 + value('vibrance'));
   const ignored = UNSUPPORTED_FILTERS.filter(([key]) => value(key)).map(([key, label]) => `${label} ${round(value(key))}`);
   const approximated = Object.entries(adjust).map(([key, number]) => `${key}(${number})`);
-  if (approximated.length) issue(sink, node, nodeId, 'image-adjust-approximated', `그림 색 보정을 CSS 필터 ${approximated.join(' ')}로 근사${ignored.length ? ` · 표현 못 함: ${ignored.join(', ')}` : ''}`);
+  const notes = [...(ignored.length ? [`표현 못 함: ${ignored.join(', ')}`] : []), ...(layered ? ['여러 겹 채우기 속 그림이라 DOM 렌더러·React 출력에는 보정이 빠짐(Canvas·SVG만 적용)'] : [])];
+  if (approximated.length) issue(sink, node, nodeId, 'image-adjust-approximated', `그림 색 보정을 CSS 필터 ${approximated.join(' ')}로 근사${notes.length ? ` · ${notes.join(' · ')}` : ''}`);
   else if (ignored.length) issue(sink, node, nodeId, 'image-adjust-unsupported', `그림 색 보정 무시: ${ignored.join(', ')}`);
   return approximated.length ? adjust : undefined;
 }

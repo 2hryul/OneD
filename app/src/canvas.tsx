@@ -3,7 +3,7 @@ import { IDENTITY, type DesignNode, type Matrix, type Page } from './model';
 import { HANDLES, boundsOf, cssMatrix, handlePoint, invert, multiply, worldCorners, worldMatrix, type Handle, type Rect } from './geometry';
 import type { Guide } from './snapping';
 import type { Measure } from './measure';
-import { fontStack, pathPaint, paintsToBackground, strokeAndEffectCss, textCss, textRuns, type AssetResolver } from './styleCss';
+import { adjustedImageFill, fontStack, pathPaint, paintsToBackground, strokeAndEffectCss, textCss, textRuns, type AssetResolver } from './styleCss';
 import { pathToD } from './path';
 import { hasMask, maskImageUrl, maskRuns } from './mask';
 import { glyphOutline } from './glyphs';
@@ -79,8 +79,11 @@ const NodeView = memo(function NodeView({ id, parentWorld, parentLocked }: NodeV
   const world = worldMatrix(node);
   const locked = parentLocked || Boolean(node.locked);
   const child = (childId: string): JSX.Element => <NodeView key={childId} id={childId} parentWorld={world} parentLocked={locked} />;
+  const adjusted = adjustedImageFill(node);
   return (
     <div data-node-id={node.id} data-interactive={node.interactions?.length ? 'true' : undefined} className={`design-node node-${node.type}`} style={nodeStyle(node, multiply(invert(parentWorld), world), locked, resolveAsset)}>
+      {/* 색 보정한 그림은 별도 겹에 그려 filter가 선·그림자·자식에 번지지 않게 한다. 자식보다 먼저 두어 아래에 깔린다. */}
+      {adjusted ? <span className="fill-layer" style={{ background: paintsToBackground([adjusted.paint], node.width, node.height, resolveAsset), filter: adjusted.filter }} /> : null}
       {node.type === 'text' ? (editing ? <TextEditor node={node} onDone={(nodeId, text) => store.scene.onTextDone(nodeId, text)} /> : <TextContent node={node} />) : null}
       {node.type === 'vector' || node.boolOp ? <VectorContent node={node} /> : null}
       {/* 불리언 그룹은 결과 경로만 보인다. 피연산자는 레이어에서 선택해 편집한다. */}
@@ -124,7 +127,7 @@ function nodeStyle(node: DesignNode, local: Matrix, locked: boolean, resolveAsse
     width: node.width,
     height: node.height,
     transform: cssMatrix(local),
-    background: paintable ? paintsToBackground(node.fills, node.width, node.height, resolveAsset) : undefined,
+    background: paintable && !adjustedImageFill(node) ? paintsToBackground(node.fills, node.width, node.height, resolveAsset) : undefined,
     ...strokeAndEffectCss(node),
     ...(node.type === 'text' ? { ...textCss(node), fontSize: node.fontSize ?? 18, fontFamily: fontStack(node.fontFamily), fontWeight: node.fontWeight } : {}),
     opacity: node.opacity,

@@ -4,7 +4,8 @@ import { addShape, applyChanges, groupShapes, updateShape } from '../src/changes
 import { frameTitleAt, hitTest } from '../src/hitTest';
 import { layerRows } from '../src/selection';
 import { makeLargeDocument, NODES_PER_CARD } from '../src/largeDoc';
-import { FrameCache, drawPage, type View } from '../src/canvasRenderer';
+import { FrameCache, drawPage, renderNodes, type View } from '../src/canvasRenderer';
+import type { DesignNode, Page } from '../src/model';
 
 const PAGE = 'page-1';
 const page = (doc: DesignDocument) => doc.pages[0]!;
@@ -29,6 +30,25 @@ beforeAll(() => {
 });
 
 const view = (patch: Partial<View> = {}): View => ({ panX: 0, panY: 0, zoom: 1, width: 800, height: 600, dpr: 1, ...patch });
+
+describe('image color adjustment on Canvas', () => {
+  it('keeps the layer blur when it adds the image color filter', () => {
+    // 그림을 그리는 순간의 ctx.filter를 기록한다. Canvas 렌더러와 PNG 내보내기가 같은 그리기 경로를 쓴다.
+    const filters: string[] = [];
+    const ctx = fakeContext();
+    const recorder = new Proxy(ctx, {
+      get: (object, key) => (key === 'drawImage' ? () => { filters.push(String(Reflect.get(object, 'filter'))); } : Reflect.get(object, key)),
+      set: (object, key, value) => Reflect.set(object, key, value)
+    });
+    const photo = (id: string, adjust?: { brightness: number }): DesignNode => ({
+      id, type: 'rectangle', name: id, parentId: null, x: 0, y: 0, width: 40, height: 40, transform: [1, 0, 0, 1, 0, 0],
+      fills: [{ type: 'image', assetId: 'a', fit: 'stretch', ...(adjust ? { adjust } : {}) }], effects: [{ type: 'layer-blur', radius: 8 }]
+    });
+    const scene: Page = { id: 'p', name: 'P', children: ['plain', 'adjusted'], objects: { plain: photo('plain'), adjusted: photo('adjusted', { brightness: 1.17 }) } };
+    renderNodes(recorder, scene, ['plain', 'adjusted'], { x: 0, y: 0, width: 40, height: 40 }, 1, () => ({ naturalWidth: 10, naturalHeight: 10 }) as never);
+    expect(filters).toEqual(['blur(4px)', 'blur(4px) brightness(1.17)']);
+  });
+});
 
 describe('large document generator', () => {
   it('makes a valid document with the stated node count', () => {

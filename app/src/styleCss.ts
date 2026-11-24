@@ -54,14 +54,16 @@ export function imageFilterCss(adjust: ImageAdjust | undefined): string | undefi
 }
 
 /**
- * 요소 전체에 걸 수 있는 그림 색 보정. CSS는 background 겹 하나에만 filter를 걸 수 없어, 채우기가 그림 하나뿐인
- * 사각형·타원(자식이 없는 도형)일 때만 요소의 filter로 쓴다. 선·그림자도 함께 보정되는 것은 근사다.
- * 여러 겹 채우기 속 그림의 보정은 Canvas 렌더러만 그 겹에 정확히 적용한다.
+ * 색 보정을 그 그림에만 걸어야 하는 채우기. CSS는 background 겹 하나에만 filter를 걸 수 없으므로, 채우기가 보정한 그림
+ * 하나뿐인 프레임·사각형·타원은 그림을 요소 안의 별도 겹(DOM 렌더러는 span, React 출력은 ::before)에 그리고 그 겹에만 filter를 건다.
+ * 요소에 걸지 않으므로 선·그림자·자식은 보정되지 않는다(Canvas·SVG와 같다). 여러 겹 채우기 속 그림의 보정은
+ * DOM·React에서 빠지고 Canvas·SVG만 그 겹에 적용한다(가져오기 보고서에 적는다).
  */
-function elementImageFilter(node: DesignNode): string | undefined {
-  if ((node.type !== 'rectangle' && node.type !== 'ellipse') || node.fills.length !== 1) return undefined;
+export function adjustedImageFill(node: DesignNode): { paint: Extract<Paint, { type: 'image' }>; filter: string } | null {
+  if ((node.type !== 'frame' && node.type !== 'rectangle' && node.type !== 'ellipse') || node.fills.length !== 1) return null;
   const paint = node.fills[0]!;
-  return paint.type === 'image' ? imageFilterCss(paint.adjust) : undefined;
+  const filter = paint.type === 'image' ? imageFilterCss(paint.adjust) : undefined;
+  return paint.type === 'image' && filter ? { paint, filter } : null;
 }
 
 /**
@@ -72,8 +74,7 @@ function elementImageFilter(node: DesignNode): string | undefined {
 export function strokeAndEffectCss(node: DesignNode): CssStyle {
   const style: CssStyle = {};
   const shadows: string[] = [];
-  const imageFilter = elementImageFilter(node);
-  const filters: string[] = imageFilter ? [imageFilter] : [];
+  const filters: string[] = [];
   // 벡터·불리언의 선은 상자가 아니라 경로에 그린다(pathPaint).
   const strokes = node.type === 'vector' || node.type === 'text' || node.boolOp ? [] : node.strokes ?? [];
   const top = strokes[strokes.length - 1];
