@@ -31,9 +31,10 @@ Preconditions:
 ## Gotchas
 
 - **원본 `.fig`는 저장소에 없다**(`.gitignore`가 `*.fig` 제외, 사용자 디자인 데이터). `VERIFY_FIG_FILE`이 없으면 이 여정은 이유와 함께 `FAIL`이고, `all`은 이 여정을 빼고 돈다.
-- 공개 샘플은 파서 저장소 `OpenFig-org/openfig-core`의 `test-fixtures/`에 있다(라이선스 파일 없음, 저장소 밖에 받아 로컬 시험에만 쓴다). 2026-11-24 확인: `OpenFigs.fig`(48KB, 프레임 1개) PASS, `vector-network/coloradjusted.fig`(2.2MB)는 페이지 맨 위가 프레임이 아닌 `ROUNDED_RECTANGLE`(id `1:2`, 그림 채우기)뿐이라 목록이 비어 node-id 없이는 `FAIL`이 맞고, `VERIFY_FIG_NODE=1:2`로 PASS.
-- 목록은 페이지 맨 위(또는 SECTION 안)의 FRAME·COMPONENT·INSTANCE·GROUP 등만 보여 준다. 맨 위가 도형·벡터뿐인 파일은 목록이 비고 안내 문구도 없다. node-id를 넣어야 한다.
-- 그림 채우기의 색 보정(`paintFilter`: 노출·대비·채도 등)은 가져오지 않고, 보고서에도 항목이 생기지 않는다. 색 보정이 든 파일은 원본보다 보정 전 사진처럼 보인다.
+- 공개 샘플은 파서 저장소 `OpenFig-org/openfig-core`의 `test-fixtures/`에 있다(라이선스 파일 없음, 저장소 밖에 받아 로컬 시험에만 쓴다). 2026-11-24 확인: `OpenFigs.fig`(48KB, 프레임 1개) PASS. `vector-network/coloradjusted.fig`(2.2MB)는 페이지 맨 위가 프레임이 아닌 `ROUNDED_RECTANGLE`(id `1:2`, 색 보정한 그림 채우기)뿐이다. 브랜치 `fix/fig-import-frameless-paintfilter` 이후로는 `VERIFY_FIG_NODE` 없이도(후보 목록의 `1:2`를 고름), `VERIFY_FIG_NODE=1:2`로도 PASS이고 보고서에 `근사한 그림 색 보정 (1)`이 뜬다. 그 전 코드에서는 node-id 없이 `FAIL`이 맞다.
+- 목록은 페이지 맨 위(또는 SECTION 안)의 FRAME·COMPONENT·INSTANCE·GROUP 등을 보여 준다. 맨 위에 프레임이 하나도 없으면 노란 안내 문구(`.import-notice`, "페이지 맨 위에는 프레임이 없습니다")가 뜨고, 목록은 `페이지 맨 위 도형 (N개)`로 바뀌어 도형·벡터·텍스트를 `이름 · 종류 · 크기 · id`로 보여 준다(하나뿐이면 미리 골라짐). 그래서 "목록 1개 이상" 확인은 프레임이 아니라 도형 후보로 통과할 수 있다.
+- 그림 채우기의 색 보정(`paintFilter`)은 근사다. 노출→`brightness(2^값)`, 대비→`contrast(1+값)`, 채도·생동감→곱한 `saturate`로 바꿔 그림 채우기의 `adjust`에 담고, 보고서에 `image-adjust-approximated`(표현 못 한 색온도·틴트·하이라이트·그림자 수치를 함께 적음)를 남긴다. 근사할 항목이 없으면 `image-adjust-unsupported`. DOM 렌더러와 React 내보내기는 채우기가 그림 하나뿐인 사각형·타원에만 요소 `filter`로 걸고(선·그림자도 같이 보정됨), Canvas 렌더러와 SVG 내보내기는 그 그림 겹에만 건다. 원본 Figma와 색이 똑같지는 않다.
+- 가져오기 보고서 창도 `class="import-modal report-modal"`이다. 가져오기 창을 기다릴 때는 `.import-modal`만으로 찾지 말고 `hasText: 'Figma 프레임 가져오기'`로 좁힌다(안 그러면 보고서 창을 가져오기 창으로 착각해 닫힘 대기가 끝나지 않는다).
 - `.fig`와 그 스크린샷은 사용자 디자인이다. 증거 폴더(`.verify-evidence/`, Git 제외) 밖으로 복사하거나 커밋하지 않는다.
 - 큰 파일(50MB, 2만 노드)은 해석에 수십 초 걸릴 수 있다. 창 대기 60초, 가져오기 대기 120초다.
 - 가져온 문서가 크면 localStorage 한도를 넘어 `자동 저장 공간이 부족합니다…`가 뜰 수 있다. 그때 `fig-autosave` 확인은 실패해야 맞다.
