@@ -1,7 +1,7 @@
 import { primaryColor, type DesignNode, type Page, type Paint, type Stroke } from './model';
 import { worldMatrix } from './geometry';
 import { pathToD } from './path';
-import { withAlpha } from './styleCss';
+import { imageFilterCss, withAlpha } from './styleCss';
 import { exportBox, layoutText, placeLines } from './canvasRenderer';
 import { maskPaths, maskRuns, maskShapes } from './mask';
 import { glyphOutline } from './glyphs';
@@ -111,7 +111,9 @@ function emitFill(writer: SvgWriter, node: DesignNode, paint: Paint): string {
   const clip = writer.id('clip');
   writer.defs.push(`<clipPath id="${clip}">${shapeElement(node, '')}</clipPath>`);
   const aspect = paint.fit === 'fill' ? 'xMidYMid slice' : paint.fit === 'fit' ? 'xMidYMid meet' : 'none';
-  return `<g clip-path="url(#${clip})"><image href="${escapeXml(href)}" width="${num(node.width)}" height="${num(node.height)}" preserveAspectRatio="${aspect}" transform="${matrixOf(node)}"${alpha < 1 ? ` opacity="${num(alpha)}"` : ''}/></g>`;
+  // 색 보정은 CSS filter로 건다(숫자만 든 값이라 그대로 넣어도 안전하다).
+  const filter = imageFilterCss(paint.adjust);
+  return `<g clip-path="url(#${clip})"><image href="${escapeXml(href)}" width="${num(node.width)}" height="${num(node.height)}" preserveAspectRatio="${aspect}" transform="${matrixOf(node)}"${alpha < 1 ? ` opacity="${num(alpha)}"` : ''}${filter ? ` style="filter: ${filter}"` : ''}/></g>`;
 }
 
 /** 선. 안쪽 선은 모양으로 자르고, 바깥 선은 모양을 가린 마스크로 두 배 굵기를 그려 정렬을 맞춘다. 경로는 늘 가운데 선이다. */

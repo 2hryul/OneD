@@ -1,7 +1,7 @@
 import { resolveGradientGeometry, type FigColor, type FigDocument, type FigNode, type FigPaint } from 'openfig-core';
 import { figGlyphPath, glyphKey } from './glyphs.ts';
 import { sniffImageMime, type AssetRecord } from './assets.ts';
-import type { Effect, GradientStop, ImageFit, Paint, Stroke, TextAlign, TextSpan, VerticalAlign } from './model.ts';
+import type { Effect, GradientStop, ImageAdjust, ImageFit, Paint, Stroke, TextAlign, TextSpan, VerticalAlign } from './model.ts';
 
 /** 가져오기에서 변환하지 못했거나 근사한 항목. 노드·속성·원인을 남겨 다음 작업의 근거로 쓴다(SPEC S3-04). */
 export interface ImportIssue { nodeId: string; name: string; kind: string; detail: string }
@@ -83,7 +83,36 @@ function figImage(sink: StyleSink, node: FigNode, nodeId: string, paint: FigPain
   if (t && (Math.abs(t.m00 - 1) > 1e-3 || Math.abs(t.m11 - 1) > 1e-3 || Math.abs(t.m02) > 1e-3 || Math.abs(t.m12) > 1e-3)) {
     issue(sink, node, nodeId, 'image-crop', `이미지 자르기·위치 변환(${mode}) 무시`);
   }
-  return { type: 'image', assetId: id, fit: IMAGE_FIT[mode] ?? 'fill', ...opacity };
+  const adjust = imageAdjust(sink, node, nodeId, paint);
+  return { type: 'image', assetId: id, fit: IMAGE_FIT[mode] ?? 'fill', ...opacity, ...(adjust ? { adjust } : {}) };
+}
+
+/** Figma 그림 채우기의 색 보정(paintFilter). 값은 -1..1이고 0이 보정 없음이다. */
+type FigPaintFilter = Partial<Record<'exposure' | 'contrast' | 'saturation' | 'vibrance' | 'temperature' | 'tint' | 'highlights' | 'shadows', number>>;
+
+/** CSS filter로 흉내 낼 수 없는 보정 항목과 보고서에 쓸 이름. */
+const UNSUPPORTED_FILTERS = [['temperature', '색온도'], ['tint', '틴트'], ['highlights', '하이라이트'], ['shadows', '그림자']] as const;
+
+/**
+ * 그림 색 보정을 CSS filter 배율로 근사하고 보고서에 남긴다.
+ * 노출은 사진의 노출 단계(stop)처럼 2^값 밝기로, 대비는 1+값으로, 채도·생동감(vibrance)은 둘을 곱한 saturate로 바꾼다.
+ * 생동감은 원래 채도가 낮은 색만 더 올리지만 CSS에는 그런 함수가 없어 채도로 근사한다. 색온도·틴트·하이라이트·그림자는 표현하지 못한다.
+ */
+function imageAdjust(sink: StyleSink, node: FigNode, nodeId: string, paint: FigPaint): ImageAdjust | undefined {
+  const filter = (paint as FigPaint & { paintFilter?: FigPaintFilter }).paintFilter;
+  if (!filter) return undefined;
+  const value = (key: keyof FigPaintFilter): number => { const raw = filter[key]; return typeof raw === 'number' && Number.isFinite(raw) && Math.abs(raw) >= 0.005 ? raw : 0; };
+  const round = (number: number): number => Math.round(number * 100) / 100;
+  const adjust: ImageAdjust = {};
+  if (value('exposure')) adjust.brightness = round(2 ** value('exposure'));
+  if (value('contrast')) adjust.contrast = round(Math.max(0, 1 + value('contrast')));
+  const saturate = Math.max(0, (1 + value('saturation')) * (1 + value('vibrance')));
+  if (Math.abs(saturate - 1) >= 0.005) adjust.saturate = round(saturate);
+  const ignored = UNSUPPORTED_FILTERS.filter(([key]) => value(key)).map(([key, label]) => `${label} ${round(value(key))}`);
+  const approximated = Object.entries(adjust).map(([key, number]) => `${key}(${number})`);
+  if (approximated.length) issue(sink, node, nodeId, 'image-adjust-approximated', `그림 색 보정을 CSS 필터 ${approximated.join(' ')}로 근사${ignored.length ? ` · 표현 못 함: ${ignored.join(', ')}` : ''}`);
+  else if (ignored.length) issue(sink, node, nodeId, 'image-adjust-unsupported', `그림 색 보정 무시: ${ignored.join(', ')}`);
+  return approximated.length ? adjust : undefined;
 }
 
 /** 단색 선만 변환한다. 선 위치(inside/center/outside)와 점선 간격을 보존한다. */

@@ -10,6 +10,8 @@ const KIND_LABEL: Record<string, string> = {
   'effect-unsupported': '지원하지 않는 효과',
   'image-missing': '이미지 없음',
   'image-crop': '이미지 자르기 무시',
+  'image-adjust-approximated': '근사한 그림 색 보정',
+  'image-adjust-unsupported': '무시한 그림 색 보정',
   'text-approximated': '텍스트 근사',
   'instance-unresolved': '펼치지 못한 인스턴스'
 };

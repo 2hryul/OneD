@@ -9,6 +9,11 @@ export const IDENTITY: Readonly<Matrix> = [1, 0, 0, 1, 0, 0];
 export interface UnitPoint { x: number; y: number }
 export interface GradientStop { offset: number; color: string }
 export type ImageFit = 'fill' | 'fit' | 'tile' | 'stretch';
+/**
+ * 그림 색 보정. 값은 CSS filter 함수의 배율이다(1이 그대로). 없는 항목은 보정하지 않는다.
+ * Figma 그림 채우기의 색 보정(노출·대비·채도)을 근사한 값이라 원본 Figma 수치와는 다르다.
+ */
+export interface ImageAdjust { brightness?: number; contrast?: number; saturate?: number }
 
 /**
  * 채우기 하나. Penpot `:fills`처럼 도형마다 목록으로 두고, 목록 뒤쪽이 위에 그려진다.
@@ -18,7 +23,7 @@ export type Paint =
   | { type: 'solid'; color: string; opacity?: number }
   | { type: 'linear'; from: UnitPoint; to: UnitPoint; stops: GradientStop[]; opacity?: number }
   | { type: 'radial'; center: UnitPoint; radius: UnitPoint; stops: GradientStop[]; opacity?: number }
-  | { type: 'image'; assetId: string; fit: ImageFit; opacity?: number };
+  | { type: 'image'; assetId: string; fit: ImageFit; opacity?: number; adjust?: ImageAdjust };
 
 export type StrokeAlign = 'inside' | 'center' | 'outside';
 export interface Stroke { color: string; width: number; align: StrokeAlign; dash?: number[] }
@@ -494,9 +499,13 @@ function isPaint(value: unknown): boolean {
     case 'solid': return typeof value.color === 'string';
     case 'linear': return isUnitPoint(value.from) && isUnitPoint(value.to) && isArrayOf(value.stops, isStop);
     case 'radial': return isUnitPoint(value.center) && isUnitPoint(value.radius) && isArrayOf(value.stops, isStop);
-    case 'image': return typeof value.assetId === 'string' && ['fill', 'fit', 'tile', 'stretch'].includes(value.fit as string);
+    case 'image': return typeof value.assetId === 'string' && ['fill', 'fit', 'tile', 'stretch'].includes(value.fit as string) && optional(value.adjust, isImageAdjust);
     default: return false;
   }
+}
+
+function isImageAdjust(value: unknown): boolean {
+  return isRecord(value) && ['brightness', 'contrast', 'saturate'].every((key) => optional(value[key], (item) => isFiniteNumber(item) && item >= 0));
 }
 
 function isStroke(value: unknown): boolean {

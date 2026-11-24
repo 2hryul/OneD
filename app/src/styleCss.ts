@@ -1,4 +1,4 @@
-import { primaryColor, type DesignNode, type GradientStop, type ImageFit, type Paint, type UnitPoint } from './model';
+import { primaryColor, type DesignNode, type GradientStop, type ImageAdjust, type ImageFit, type Paint, type UnitPoint } from './model';
 
 /** 캔버스와 React 출력이 같은 규칙으로 쓰는 CSS 속성 묶음. React style 객체 키 이름을 쓴다. */
 export type CssStyle = Partial<Record<'background' | 'boxShadow' | 'outline' | 'outlineOffset' | 'filter' | 'backdropFilter' | 'color' | 'textAlign' | 'lineHeight' | 'letterSpacing' | 'justifyContent', string>>;
@@ -46,6 +46,24 @@ function stopList(stops: readonly GradientStop[], alpha: number, place: (offset:
   return stops.map((stop) => `${withAlpha(stop.color, alpha)} ${round(place(stop.offset) * 100)}%`).join(', ');
 }
 
+/** 그림 색 보정을 CSS filter 값으로. 보정이 없으면 undefined. Canvas 2D의 ctx.filter도 같은 문법을 받는다. */
+export function imageFilterCss(adjust: ImageAdjust | undefined): string | undefined {
+  if (!adjust) return undefined;
+  const parts = (['brightness', 'contrast', 'saturate'] as const).flatMap((key) => (adjust[key] !== undefined ? [`${key}(${round(adjust[key]!)})`] : []));
+  return parts.length ? parts.join(' ') : undefined;
+}
+
+/**
+ * 요소 전체에 걸 수 있는 그림 색 보정. CSS는 background 겹 하나에만 filter를 걸 수 없어, 채우기가 그림 하나뿐인
+ * 사각형·타원(자식이 없는 도형)일 때만 요소의 filter로 쓴다. 선·그림자도 함께 보정되는 것은 근사다.
+ * 여러 겹 채우기 속 그림의 보정은 Canvas 렌더러만 그 겹에 정확히 적용한다.
+ */
+function elementImageFilter(node: DesignNode): string | undefined {
+  if ((node.type !== 'rectangle' && node.type !== 'ellipse') || node.fills.length !== 1) return undefined;
+  const paint = node.fills[0]!;
+  return paint.type === 'image' ? imageFilterCss(paint.adjust) : undefined;
+}
+
 /**
  * 선과 효과를 CSS로 바꾼다.
  * 위쪽 선은 outline(점선 지원, border-radius를 따름)으로, 나머지 선과 그림자는 box-shadow로 그린다. border를 쓰지 않는 이유는 자식 배치 기준이 밀리기 때문이다.
@@ -54,7 +72,8 @@ function stopList(stops: readonly GradientStop[], alpha: number, place: (offset:
 export function strokeAndEffectCss(node: DesignNode): CssStyle {
   const style: CssStyle = {};
   const shadows: string[] = [];
-  const filters: string[] = [];
+  const imageFilter = elementImageFilter(node);
+  const filters: string[] = imageFilter ? [imageFilter] : [];
   // 벡터·불리언의 선은 상자가 아니라 경로에 그린다(pathPaint).
   const strokes = node.type === 'vector' || node.type === 'text' || node.boolOp ? [] : node.strokes ?? [];
   const top = strokes[strokes.length - 1];
