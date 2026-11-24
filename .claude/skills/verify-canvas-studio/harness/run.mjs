@@ -1,5 +1,6 @@
 // 사용법: node run.mjs <journey> [--port 5179] [--headed] [--url http://127.0.0.1:5173/]
-//   journey: json-open | reload-persist | code-zip | fig-import | all
+//   journey: json-open | reload-persist | code-zip | fig-import | export-quality | all
+//   export-quality는 test/(또는 VERIFY_FIG_DIR)의 .fig 프레임을 모두 재므로 all에 넣지 않는다. VERIFY_FIG_ONLY로 프레임 키 일부를 줄 수 있다.
 //   --url을 주면 서버를 띄우지 않고 이미 떠 있는 Canvas Studio를 몬다(그 서버는 끄지 않는다).
 // 끝나면 증거 폴더 경로와 PASS/FAIL을 출력한다. 하나라도 실패하면 종료 코드 1.
 import { chromium } from 'playwright-core';
@@ -7,6 +8,7 @@ import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join, basename } from 'node:path';
 import { DEFAULT_PORT, SKILL_DIR, findBrowser, startServer, stopPid, newEvidenceDir, zipEntries, probe, PID_FILE } from './lib.mjs';
 import { rmSync } from 'node:fs';
+import { exportQuality } from './export-quality.mjs';
 
 const FIXTURE = join(SKILL_DIR, 'fixtures', 'verify-doc.json');
 const FIXTURE_DOC_NAME = 'VERIFY 문서';
@@ -165,7 +167,10 @@ const journeys = {
     }
     ev.check('가져온 문서가 자동 저장소에 들어감', savedName === afterName && savedName !== beforeName, `저장본 이름 "${savedName}"`);
     await ev.shot('after-import');
-  }
+  },
+
+  /** 내보낸 React 코드의 품질 지표(빌드, 반응형, 태그, 픽셀 차이)와 목표 달성. 자세한 내용은 features/export-quality.md. */
+  'export-quality': exportQuality
 };
 
 async function runOne(browser, url, name) {
@@ -199,7 +204,7 @@ async function runOne(browser, url, name) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const names = args.journey === 'all' ? Object.keys(journeys).filter((n) => n !== 'fig-import' || process.env.VERIFY_FIG_FILE) : [args.journey];
+  const names = args.journey === 'all' ? Object.keys(journeys).filter((n) => n !== 'export-quality' && (n !== 'fig-import' || process.env.VERIFY_FIG_FILE)) : [args.journey];
   if (!names.every((n) => journeys[n])) { console.error(`알 수 없는 여정: ${args.journey}. 가능: ${Object.keys(journeys).join(', ')}, all`); process.exit(2); }
   const browserInfo = findBrowser();
   if (!browserInfo) { console.error('Edge/Chrome을 찾지 못했습니다. VERIFY_BROWSER에 실행 파일 경로를 주세요.'); process.exit(2); }
