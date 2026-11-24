@@ -79,14 +79,17 @@ async function bundle(dir) {
 /** 레이아웃이 끝날 때까지(글꼴 준비 + 두 프레임) 기다린다. 고정 시간 대기보다 빠르고 같은 결과를 낸다. */
 const settled = (page) => page.evaluate(async () => { await document.fonts.ready; await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))); });
 
-/** 내보낸 화면 하나를 지금 폭으로 재서 배치·태그·글자 넘침을 돌려준다. 정의는 2026-11-24 수동 측정과 같다. */
+/**
+ * 내보낸 화면 하나를 지금 폭으로 재서 배치·태그·글자 넘침을 돌려준다.
+ * SVG 안쪽 도형(path 등)은 세지 않는다. 바깥 svg 상자가 넘친 부분을 잘라 보이지 않는데도 경로 상자가 넘친 것으로 잡히기 때문이다(svg 상자 자체는 센다).
+ */
 async function measureExport(page, shotPath, rootShotPath) {
   await settled(page);
   const metrics = await page.evaluate(() => {
     const root = document.querySelector('#root > *');
     if (!root) return null;
     const vw = document.documentElement.clientWidth;
-    const elements = [...root.querySelectorAll('*')];
+    const elements = [...root.querySelectorAll('*')].filter((el) => !(el instanceof SVGElement) || el.tagName.toLowerCase() === 'svg');
     const outside = elements.filter((el) => { const r = el.getBoundingClientRect(); return r.width > 0 && (r.right > vw + 1 || r.left < -1); }).length;
     const texts = elements.filter((el) => [...el.childNodes].some((n) => n.nodeType === 3 && n.textContent.trim()));
     const textOverflow = texts.filter((el) => el.scrollWidth > el.clientWidth + 1 || el.scrollHeight > el.clientHeight + 1).length;
