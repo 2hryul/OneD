@@ -66,8 +66,10 @@ describe('semantic tags', () => {
     const { code, css } = exportTsx(loginForm(), PAGE, 'form');
     expect(code).toContain('<h1 className="login-form__title">');
     expect(code).toContain('<label className="login-form__label">');
-    expect(code).toMatch(/<label className="login-form__input">\s*<input className="login-form__placeholder" type="text" placeholder=\{placeholder\d+ \?\? "Enter email"\} \/>\s*<\/label>/);
-    expect(code).toContain('type="password" placeholder={placeholder');
+    // 화면 입력란은 값 prop과 바뀜 콜백을 받는다(값을 주지 않으면 브라우저가 값을 가진다).
+    expect(code).toMatch(/<label className="login-form__input">\s*<input className="login-form__placeholder" type="text" value=\{enterEmailValue\} onChange=\{\(event\) => onEnterEmailChange\?\.\(event\.target\.value\)\} placeholder=\{placeholder\d+ \?\? "Enter email"\} \/>\s*<\/label>/);
+    expect(code).toContain('  enterEmailValue?: string;\n  onEnterEmailChange?: (value: string) => void;');
+    expect(code).toContain('type="password" value={enterPasswordValue} onChange={(event) => onEnterPasswordChange?.(event.target.value)} placeholder={placeholder');
     expect(code).toMatch(/<button className="login-form__button-primary" type="button">\s*<span className="login-form__button-label">/);
     expect(rule(css, 'login-form__title')).toContain('margin: 0;');
     expect(rule(css, 'login-form__button-primary')).toContain('border: 0;');
@@ -355,7 +357,10 @@ describe('production-ready structure', () => {
   it('turns state differences into conditions when variants share a structure', () => {
     const { code } = exportTsx(fieldSet([['txt', 'Type=txt, State=default', 'txt', 0], ['off', 'Type=txt, State=disabled', 'txt', 400]]), PAGE, 'form-set');
     expect(code.match(/^(export )?function /gm)).toHaveLength(1);
-    expect(code).toContain('<input disabled={(state ?? "default") === "disabled"} className=');
+    // default·disabled 상태 variant는 disabled prop이 된다. 입력은 그 prop으로 막히고, 루트는 data-disabled로 CSS가 고른다.
+    expect(code).toContain('disabled?: boolean;');
+    expect(code).toContain('<input disabled={Boolean(disabled)} className=');
+    expect(code).toMatch(/<div data-type=\{type \?\? "txt"\} data-disabled=\{disabled \|\| undefined\} \{\.\.\.rest\}/);
     compiles(code);
   });
 
@@ -400,7 +405,7 @@ describe('layer roles', () => {
     Object.entries(roles).reduce((current, [id, role]) => apply(current, updateShape(current, PAGE, id, { role })), doc);
   /** 글자 text를 담은 요소의 태그와 속성(class 제외). 글 내용이 이름인 레이어는 class가 역할 이름(title, input)이라 글자로 찾는다. */
   const tagOf = (code: string, text: string): string[] =>
-    [...code.matchAll(/<(\w+) className="[^"]+"([^>]*?)(?:>\{\w+ \?\? "([^"]*)"\}|placeholder=\{\w+ \?\? "([^"]*)"\} \/>)/g)]
+    [...code.replace(/ value=\{\w+\} onChange=\{\(event\) => \w+\?\.\(event\.target\.value\)\}/g, '').matchAll(/<(\w+) className="[^"]+"([^>]*?)(?:>\{\w+ \?\? "([^"]*)"\}|placeholder=\{\w+ \?\? "([^"]*)"\} \/>)/g)]
       .filter((match) => (match[3] ?? match[4]) === text).map((match) => `${match[1]}${match[2]!.replace(/\s+$/, '')}`);
 
   it('exports the roles a publisher picked even when layer names say nothing', () => {
@@ -457,5 +462,77 @@ describe('layer roles', () => {
     expect(code).toMatch(/<img className="login__brand-logo" src=\{imageSrc1\} alt="Brand logo" \/>/);
     expect(files.some((file) => file.path === 'assets/brand-logo.svg')).toBe(true);
     compiles(code);
+  });
+});
+
+describe('states and prototype links', () => {
+  const ROW: FlexLayout = { type: 'flex', direction: 'row', wrap: false, gap: 8, crossGap: 0, padding: [12, 16, 12, 16], justify: 'start', align: 'center' };
+  /** 상태 variant 다섯 개인 Button 세트와, 그 인스턴스 둘(보통·누를 수 없음)을 쓴 화면. */
+  function buttonScreen(): DesignDocument {
+    let doc: DesignDocument = { version: 5, name: 'States', components: {}, tokens: {}, pages: [{ id: PAGE, name: 'Page 1', children: [], objects: {} }] };
+    const states = [['b0', 'State=Default', '#1e6fff'], ['b1', 'State=Hover', '#0050d0'], ['b2', 'State=Pressed', '#003da0'], ['b3', 'State=Focus', '#1e6fff'], ['b4', 'State=Disabled', '#9ca3af']] as const;
+    states.forEach(([id, variant, color], index) => {
+      doc = add(doc, { id, type: 'frame', name: variant, parentId: null, x: index * 200, y: 0, width: 120, height: 40, fills: solid(color), layout: ROW, ...(id === 'b3' ? { strokes: [{ color: '#111827', width: 2, align: 'outside' as const }] } : {}) });
+      doc = add(doc, { id: `${id}-t`, type: 'text', name: 'Label', parentId: id, x: index * 200 + 16, y: 10, width: 60, height: 20, fills: solid('#ffffff'), text: 'Save', fontSize: 14, item: { h: 'auto', v: 'auto' } });
+      doc = apply(doc, createComponent(doc, PAGE, id, `c-${id}`));
+    });
+    doc = apply(doc, combineAsVariants(doc, PAGE, states.map(([id]) => id), 'set', 'Button'));
+    doc = add(doc, { id: 'screen', type: 'frame', name: 'Home', parentId: null, x: 0, y: 200, width: 600, height: 400, fills: solid('#ffffff') });
+    doc = apply(doc, createInstance(doc, PAGE, 'c-b0', { parentId: 'screen', x: 20, y: 220 }, () => 'go').tx);
+    doc = apply(doc, createInstance(doc, PAGE, 'c-b4', { parentId: 'screen', x: 20, y: 300 }, () => 'off').tx);
+    doc = add(doc, { id: 'login', type: 'frame', name: 'Login', parentId: null, x: 700, y: 200, width: 600, height: 400, fills: solid('#ffffff') });
+    return doc;
+  }
+
+  it('turns Hover, Pressed, Focus and Disabled variants into pseudo-class rules and a disabled prop', () => {
+    const { code, css } = exportTsx(buttonScreen(), PAGE, 'set');
+    expect(code.match(/^(export )?function /gm)).toHaveLength(1);
+    // 상태는 prop이 아니다. Disabled만 disabled prop이고 button 루트의 disabled 속성이 된다.
+    expect(code).not.toContain('state?:');
+    expect(code).toContain('disabled?: boolean;');
+    expect(code).toMatch(/<button type="button" disabled=\{disabled\} \{\.\.\.rest\}/);
+    expect(css).toMatch(/\.button:hover:not\(:disabled\) \{\n {2}background-color: #0050d0;\n\}/);
+    expect(css).toMatch(/\.button:active:not\(:disabled\) \{\n {2}background-color: #003da0;\n\}/);
+    expect(css).toMatch(/\.button:focus-visible:not\(:disabled\) \{\n {2}outline: 2px solid #111827;/);
+    expect(css).toMatch(/\.button:disabled \{\n {2}background-color: #9ca3af;\n\}/);
+    // 누름이 hover보다 뒤에 와서, 누르는 동안(hover 중이기도 함) 누름 색이 이긴다.
+    expect(css.indexOf('.button:active')).toBeGreaterThan(css.indexOf('.button:hover'));
+    compiles(code);
+  });
+
+  it('passes only the Disabled state to instances', () => {
+    const { files } = exportTsx(buttonScreen(), PAGE, 'screen');
+    const screen = files.find((file) => file.path === 'Home.tsx')!.data;
+    expect(screen).toMatch(/<Button className="home__button" \/>/);
+    expect(screen).toMatch(/<Button className="home__button-2" disabled \/>/);
+    // 흐름 배치로 바꾼 화면에서 인스턴스도 다른 요소처럼 들여쓰기(20px = 600px의 3.33%)를 지키고, 좁은 화면에서 지운다.
+    const css = files.find((file) => file.path === 'Home.css')!.data;
+    expect(css).toMatch(/\n\.home__button \{[^}]*margin-left: 3\.33%;/);
+    expect(css).toMatch(/@media \(max-width: 767px\) \{[\s\S]*\.home__button \{\n {4}margin-left: 0;/);
+    for (const file of files.filter((item) => item.path.endsWith('.tsx'))) compiles(file.data);
+  });
+
+  it('exports prototype links as onNavigate, onOpenChange, onBack and safe links', () => {
+    let doc = buttonScreen();
+    const click = (action: NonNullable<NodeInput['interactions']>[number]['action']): NonNullable<NodeInput['interactions']> => [{ trigger: 'click', action }];
+    doc = add(doc, { id: 'next', type: 'text', name: 'Sign in', parentId: 'screen', x: 300, y: 220, width: 100, height: 24, fills: solid('#111111'), text: 'Sign in', fontSize: 32, fontWeight: 700, interactions: click({ type: 'navigate', destination: 'login' }) });
+    doc = add(doc, { id: 'docs', type: 'text', name: 'Docs', parentId: 'screen', x: 300, y: 260, width: 100, height: 24, fills: solid('#111111'), text: 'Docs', fontSize: 16, interactions: click({ type: 'open-url', url: 'https://example.com/docs' }) });
+    doc = add(doc, { id: 'evil', type: 'text', name: 'Evil', parentId: 'screen', x: 300, y: 300, width: 100, height: 24, fills: solid('#111111'), text: 'Evil', fontSize: 16, interactions: click({ type: 'open-url', url: 'javascript:alert(1)' }) });
+    doc = add(doc, { id: 'menu', type: 'frame', name: 'Menu', parentId: 'screen', x: 300, y: 340, width: 40, height: 40, fills: solid('#eeeeee'), interactions: click({ type: 'toggle-overlay', destination: 'login', position: 'center', closeOnOutside: true, background: false }) });
+    doc = add(doc, { id: 'back', type: 'text', name: 'Back', parentId: 'screen', x: 400, y: 340, width: 60, height: 24, fills: solid('#111111'), text: 'Back', fontSize: 16, interactions: click({ type: 'back' }) });
+    doc = apply(doc, updateShape(doc, PAGE, 'go', { interactions: click({ type: 'navigate', destination: 'login' }) }));
+    const { code, files } = exportTsx(doc, PAGE, 'screen');
+    // 화면 이동 글자는 큰 굵은 글자여도 제목이 아니라 링크이고, 누르면 프레임 이름으로 onNavigate를 부른다.
+    expect(code).toMatch(/<a className="home__sign-in" href="#" onClick=\{\(event\) => \{ event\.preventDefault\(\); onNavigate\?\.\("Login"\); \}\}>/);
+    expect(code).not.toContain('<h1');
+    expect(code).toMatch(/<a className="home__docs" href="https:\/\/example\.com\/docs" target="_blank" rel="noreferrer">/);
+    expect(code).not.toContain('javascript:');
+    expect(code).toMatch(/<button className="home__menu" type="button" aria-label="Menu" aria-haspopup="dialog" aria-expanded=\{open \?\? false\} onClick=\{\(\) => onOpenChange\?\.\(!open, "Login"\)\} \/>/);
+    expect(code).toMatch(/<button className="home__back" type="button" onClick=\{\(\) => onBack\?\.\(\)\}>/);
+    expect(code).toMatch(/onNavigate\?: \(screen: string\) => void;\n {2}open\?: boolean;\n {2}onOpenChange\?: \(open: boolean, overlay: string\) => void;\n {2}onBack\?: \(\) => void;/);
+    // 인스턴스에 건 연결은 컴포넌트 루트로 넘어간다.
+    const screen = files.find((file) => file.path === 'Home.tsx')!.data;
+    expect(screen).toMatch(/<Button className="home__button" onClick=\{\(event\) => \{ event\.preventDefault\(\); onNavigate\?\.\("Login"\); \}\} \/>/);
+    for (const file of files.filter((item) => item.path.endsWith('.tsx'))) compiles(file.data);
   });
 });
