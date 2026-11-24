@@ -16,12 +16,15 @@ export interface ExportFile { path: string; data: string }
 /**
  * 내보낸 결과. code는 미리보기용 한 파일 TSX이고 첫 줄들에서 cssFile(같은 폴더의 CSS 파일, 내용은 css)과 그림을 import한다.
  * files는 프로젝트에 넣을 형태로 나눈 파일들이다(화면 파일, components/컴포넌트별 TSX·CSS, components/index.ts, tokens.css).
- * assets는 코드와 CSS가 쓰는 그림 id 목록이다(묶어 받기용).
+ * assets는 코드와 CSS가 쓰는 그림 id 목록이다(묶어 받기용). missingAssets는 디자인이 쓰지만 파일이 없어 빈 자리(체크무늬)로 낸 그림 id다.
  */
-export interface ExportResult { name: string; code: string; css: string; cssFile: string; assets: string[]; files: ExportFile[] }
+export interface ExportResult { name: string; code: string; css: string; cssFile: string; assets: string[]; missingAssets: string[]; files: ExportFile[] }
 
-/** assetFile: 그림 id → assets 폴더 안의 파일 이름(확장자 포함). 없으면 id를 그대로 쓴다. */
-export interface ExportOptions { assetFile?: (assetId: string) => string }
+/**
+ * assetFile: 그림 id → assets 폴더 안의 파일 이름(확장자 포함). 없으면 id를 그대로 쓴다.
+ * hasAsset: 그 그림 파일이 있는지. 없는 그림을 import하면 받은 코드가 빌드되지 않으므로 빈 자리로 낸다. 없으면 모두 있다고 본다.
+ */
+export interface ExportOptions { assetFile?: (assetId: string) => string; hasAsset?: (assetId: string) => boolean }
 
 function identifier(name: string): string {
   const parts = name.normalize('NFKD').replace(/[^a-zA-Z0-9]+/g, ' ').trim().split(/\s+/).filter(Boolean);
@@ -74,8 +77,11 @@ const RESERVED = new Set(['break', 'case', 'catch', 'class', 'const', 'continue'
 /** 컴포넌트 코드가 직접 쓰는 이름. prop이 이 이름을 가지면 덮어써지므로 피한다. */
 const LOCAL_NAMES = ['style', 'className', 'rest', 'props', 'fieldId', 'key', 'ref', 'children'];
 
-/** 스타일을 만들 때 도형 밖에서 알아야 하는 것. fluid는 화면 루트, control은 입력 요소(input·textarea), asset은 그림 파일 이름이다. */
-interface StyleHints { fluid?: boolean; control?: boolean; asset: (assetId: string) => string }
+/** 스타일을 만들 때 도형 밖에서 알아야 하는 것. fluid는 화면 루트, control은 입력 요소(input·textarea), asset은 그림 파일 이름(파일이 없으면 null)이다. */
+interface StyleHints { fluid?: boolean; control?: boolean; asset: (assetId: string) => string | null }
+
+/** CSS url()에 쓸 그림 경로. 파일이 없으면 null이라 paintsToBackground가 빈 자리(체크무늬)를 그린다. */
+const assetUrl = (asset: StyleHints['asset']) => (assetId: string): string | null => { const file = asset(assetId); return file === null ? null : `./assets/${file}`; };
 
 /**
  * 부모 안에서의 위치와 크기. 오토 레이아웃 부모의 흐름 안에 있으면 좌표 없이 크기 규칙만 쓰고(S4-05),
@@ -208,7 +214,7 @@ function fillStyle(node: DesignNode, asset: StyleHints['asset']): Style {
     if (rest.length === 0) return { backgroundColor: color };
     if (rest.every((paint) => paint.type !== 'image')) return { backgroundColor: color, backgroundImage: paintsToBackground(rest, node.width, node.height, () => null)! };
   }
-  const background = paintsToBackground(node.fills, node.width, node.height, (assetId) => `./assets/${asset(assetId)}`);
+  const background = paintsToBackground(node.fills, node.width, node.height, assetUrl(asset));
   return background ? { background } : {};
 }
 
@@ -278,11 +284,11 @@ interface Rendered { body: string[]; usesId: boolean; rules: CssRule[]; rootTag?
 
 /**
  * 파일 하나를 만드는 동안의 상태. rules는 CSS 규칙을 쓸 순서대로 모은다(컴포넌트 규칙이 그것을 쓰는 쪽보다 앞).
- * images는 img로 낸 그림 id → import 변수 이름, assets는 코드·CSS가 쓴 모든 그림 id다.
+ * images는 img로 낸 그림 id → import 변수 이름, assets는 코드·CSS가 쓴 모든 그림 id, missing은 파일이 없어 빈 자리로 낸 그림 id다.
  */
 interface ExportState {
   doc: DesignDocument; plans: Map<string, ComponentPlan>; names: Set<string>; classes: Set<string>; rules: CssRule[]; vars: TokenVars;
-  images: Map<string, string>; assets: Set<string>; assetFile: (assetId: string) => string; usesId: boolean;
+  images: Map<string, string>; assets: Set<string>; missing: Set<string>; assetFile: (assetId: string) => string; hasAsset: (assetId: string) => boolean; usesId: boolean;
 }
 
 /**
@@ -415,6 +421,13 @@ function elementOf(node: DesignNode, phrasing: boolean, context: RenderContext):
   const any = hasRole(node, 'button') && walkPage(context.page, [node.id]).some((item) => item.type === 'text' && !context.hidden.has(item.id));
   const element = boxElement(node, phrasing, { any, input: Boolean(input), label });
   if (element.tag === 'label' && input) context.inputs.set(input.id, hasRole(node, 'password'));
+  if (element.tag === 'img' && element.assetId && !context.state.hasAsset(element.assetId)) {
+    // 파일이 없는 그림은 import하지 않고 빈 자리 상자로 낸다(배경은 fillStyle이 체크무늬로 채운다). 그림 이름은 그대로 알린다.
+    context.state.missing.add(element.assetId);
+    const alt = element.attrs.find((attr) => attr.startsWith('alt='))?.slice(4);
+    const attrs = alt && alt !== '""' ? ['role="img"', `aria-label=${alt}`] : [];
+    return phrasing ? { tag: 'span', attrs, reset: { display: 'block' }, phrasing: true } : { tag: 'div', attrs, reset: {}, phrasing: false };
+  }
   return element;
 }
 
@@ -446,7 +459,11 @@ function stackOnNarrow(node: DesignNode, style: Style, context: RenderContext): 
 function addRule(context: RenderContext, className: string, node: DesignNode, parent: DesignNode | null, element: Element, extra: Style = {}): void {
   const { state } = context;
   const root = node.id === context.rootId;
-  const hints: StyleHints = { fluid: root && context.fluid, control: element.tag === 'input' || element.tag === 'textarea', asset: (id) => { state.assets.add(id); return state.assetFile(id); } };
+  const hints: StyleHints = { fluid: root && context.fluid, control: element.tag === 'input' || element.tag === 'textarea', asset: (id) => {
+    if (!state.hasAsset(id)) { state.missing.add(id); return null; }
+    state.assets.add(id);
+    return state.assetFile(id);
+  } };
   const style: Style = { ...element.reset, ...styleFor(node, parent, hints), ...extra };
   if (element.tag === 'img') delete style.background;
   // 색 보정한 그림은 ::before 겹에만 filter를 건다. isolation으로 쌓임 맥락을 만들어 z-index -1 겹이 요소 배경 위·자식 아래에 깔리게 한다.
@@ -455,7 +472,7 @@ function addRule(context: RenderContext, className: string, node: DesignNode, pa
   const final = withTokens(withTypography(style, node, state.vars), node, state.vars);
   context.rules.push({ selector: `.${className}`, style: final, keepOrder: root && context.component });
   if (adjusted) {
-    const background = paintsToBackground([adjusted.paint], node.width, node.height, (assetId) => `./assets/${hints.asset(assetId)}`)!;
+    const background = paintsToBackground([adjusted.paint], node.width, node.height, assetUrl(hints.asset))!;
     context.rules.push({ selector: `.${className}::before`, style: { content: '""', position: 'absolute', inset: '0', zIndex: '-1', borderRadius: 'inherit', background, filter: adjusted.filter, pointerEvents: 'none' } });
   }
   const stacked = stackOnNarrow(node, final, context);
@@ -997,7 +1014,7 @@ export function exportTsx(doc: DesignDocument, pageId: string, selectedId: strin
   const page = doc.pages.find((item) => item.id === pageId);
   const root = page?.objects[selectedId];
   if (!page || !root) throw new Error('Select a node to export');
-  const state: ExportState = { doc, plans: new Map(), names: new Set(), classes: new Set(), rules: [], vars: tokenVars(doc), images: new Map(), assets: new Set(), assetFile: options.assetFile ?? ((id) => id), usesId: false };
+  const state: ExportState = { doc, plans: new Map(), names: new Set(), classes: new Set(), rules: [], vars: tokenVars(doc), images: new Map(), assets: new Set(), missing: new Set(), assetFile: options.assetFile ?? ((id) => id), hasAsset: options.hasAsset ?? (() => true), usesId: false };
   const componentId = root.componentId ?? (root.componentSet ? Object.values(doc.components).find((item) => item.setId === root.id)?.id : undefined);
   if (componentId && (root.mainInstance || root.componentSet)) {
     const plan = ensurePlan(state, componentId);
@@ -1040,7 +1057,7 @@ function result(state: ExportState, name: string, screen?: { owner: Owner; code:
   const cssFile = `${name}.css`;
   const images = [...state.images].map(([assetId, variable]) => `import ${variable} from './assets/${state.assetFile(assetId)}';`);
   const code = [reactImport(state.usesId), `import './${cssFile}';`, ...images, '', ...(screen?.code ?? []), ...[...state.plans.values()].flatMap((plan) => plan.code)].join('\n');
-  return { name, code, css: cssText(state.rules, state.vars), cssFile, assets: [...state.assets], files: splitFiles(state, screen) };
+  return { name, code, css: cssText(state.rules, state.vars), cssFile, assets: [...state.assets], missingAssets: [...state.missing], files: splitFiles(state, screen) };
 }
 
 /**

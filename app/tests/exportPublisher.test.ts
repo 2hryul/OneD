@@ -104,6 +104,25 @@ describe('semantic tags', () => {
     expect(rule(css, 'landing-page__hero-photo')).toContain('object-fit: cover;');
     expect(rule(css, 'landing-page__hero-photo')).not.toContain('background');
   });
+
+  it('leaves an empty placeholder instead of importing an image file that does not exist', () => {
+    // 예전 형식 .fig처럼 그림 데이터가 없는 파일. 없는 파일을 import하면 받은 코드가 빌드되지 않는다.
+    let doc = add(sampleDocument(), { id: 'photo', type: 'rectangle', name: 'Hero photo', parentId: 'frame-1', x: 0, y: 0, width: 100, height: 80, fills: [{ type: 'image', assetId: 'gone', fit: 'fill' }] });
+    doc = add(doc, { id: 'banner', type: 'rectangle', name: 'Banner', parentId: 'frame-1', x: 0, y: 100, width: 100, height: 40, fills: [...solid('#ffffff'), { type: 'image', assetId: 'gone2', fit: 'tile' }] });
+    doc = add(doc, { id: 'kept', type: 'rectangle', name: 'Logo', parentId: 'frame-1', x: 0, y: 150, width: 40, height: 40, fills: [{ type: 'image', assetId: 'here', fit: 'fill' }] });
+    const result = exportTsx(doc, PAGE, 'frame-1', { hasAsset: (id) => id === 'here' });
+    expect(result.missingAssets.sort()).toEqual(['gone', 'gone2']);
+    expect(result.assets).toEqual(['here']);
+    const files = result.files.map((file) => file.data).join('\n');
+    expect(files).not.toMatch(/assets\/gone/);
+    expect(files).toContain("from './assets/here';");
+    // img 대신 그림 역할과 이름이 있는 빈 자리 상자, 배경은 편집기처럼 체크무늬다.
+    expect(result.code).toContain('<div className="landing-page__hero-photo" role="img" aria-label="Hero photo" />');
+    expect(rule(result.css, 'landing-page__hero-photo')).toContain('repeating-conic-gradient');
+    compiles(result.code);
+    // hasAsset을 주지 않으면 이전처럼 모두 있다고 본다.
+    expect(exportTsx(doc, PAGE, 'frame-1').missingAssets).toEqual([]);
+  });
 });
 
 describe('tokens as CSS variables', () => {

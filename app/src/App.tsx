@@ -219,6 +219,8 @@ export function App(): JSX.Element {
   const [activeComment, setActiveComment] = useState<string | null>(null);
   const [rightTab, setRightTab] = useState<'design' | 'prototype' | 'code'>('design');
   const [codeAssets, setCodeAssets] = useState<Map<string, AssetRecord>>(new Map());
+  // 코드가 쓰지만 저장소(IndexedDB)에 없는 그림. 내보낸 코드는 이 그림을 import하지 않고 빈 자리로 낸다.
+  const [missingCodeAssets, setMissingCodeAssets] = useState<ReadonlySet<string>>(new Set());
   const [viewerStart, setViewerStart] = useState<string | null>(null);
 
   const page = pageOf(doc, pageId);
@@ -230,28 +232,39 @@ export function App(): JSX.Element {
     const mime = codeAssets.get(assetId)?.mime;
     return mime && IMAGE_EXT[mime] ? `${assetId}.${IMAGE_EXT[mime]}` : assetId;
   }, [codeAssets]);
-  const exported = codeOpen && selected ? exportTsx(doc, page.id, selected.id, { assetFile }) : null;
-  const exportedAssets = exported?.assets.join(',') ?? '';
+  const hasCodeAsset = useCallback((assetId: string) => !missingCodeAssets.has(assetId), [missingCodeAssets]);
+  const exported = codeOpen && selected ? exportTsx(doc, page.id, selected.id, { assetFile, hasAsset: hasCodeAsset }) : null;
+  // 있는 그림과 없는 그림을 합친 목록은 hasAsset과 관계없이 같아서, 읽은 결과로 다시 내보내도 다시 읽지 않는다.
+  const exportedAssets = exported ? [...exported.assets, ...exported.missingAssets].sort().join(',') : '';
 
   // 코드 창이 열리면 코드가 쓰는 그림의 형식(MIME)을 읽어 둔다. import 경로에 확장자를 붙이고 zip에 같은 이름으로 넣기 위해서다.
   useEffect(() => {
     if (!exportedAssets) return;
     let cancelled = false;
-    getAssets(exportedAssets.split(','))
-      .then((records) => { if (!cancelled) setCodeAssets(new Map(records.map((record) => [record.id, record]))); })
+    const ids = exportedAssets.split(',');
+    getAssets(ids)
+      .then((records) => {
+        if (cancelled) return;
+        setCodeAssets(new Map(records.map((record) => [record.id, record])));
+        const found = new Set(records.map((record) => record.id));
+        const missing = ids.filter((id) => !found.has(id));
+        setMissingCodeAssets((previous) => (missing.length === previous.size && missing.every((id) => previous.has(id)) ? previous : new Set(missing)));
+      })
       .catch((error: unknown) => setNotice(error instanceof Error ? error.message : '[codeAssets] 그림 읽기 실패'));
     return () => { cancelled = true; };
   }, [exportedAssets]);
 
-  /** 프로젝트에 넣을 형태로 나눈 파일(화면, components/, tokens.css)과 그림을 zip 하나로. 저장소에 없는 그림은 빼고 알린다. */
+  /** 프로젝트에 넣을 형태로 나눈 파일(화면, components/, tokens.css)과 그림을 zip 하나로. 저장소에 없는 그림은 빈 자리로 내고 알린다. */
   const downloadCodeZip = (): void => {
-    if (!exported) return;
-    const files: ZipEntry[] = exported.files.map((file) => ({ path: file.path, data: file.data }));
-    const missing = exported.assets.filter((id) => !codeAssets.has(id));
-    for (const id of exported.assets) { const record = codeAssets.get(id); if (record) files.push({ path: `assets/${assetFile(id)}`, data: record.bytes }); }
+    if (!exported || !selected) return;
+    // zip에 넣는 그림만 import하도록 지금 읽어 둔 그림 기준으로 다시 낸다(그림을 다 읽기 전에 눌러도 빌드되는 코드가 된다).
+    const ready = exportTsx(doc, page.id, selected.id, { assetFile, hasAsset: (assetId) => codeAssets.has(assetId) });
+    const files: ZipEntry[] = ready.files.map((file) => ({ path: file.path, data: file.data }));
+    const missing = ready.missingAssets;
+    for (const id of ready.assets) { const record = codeAssets.get(id); if (record) files.push({ path: `assets/${assetFile(id)}`, data: record.bytes }); }
     try {
       downloadBlob(`${exported.name}.zip`, new Blob([createZip(files)], { type: 'application/zip' }));
-      setNotice(missing.length ? `zip을 받았습니다. 그림 ${missing.length}개는 저장소에 없어 빠졌습니다.` : `zip을 받았습니다(파일 ${files.length}개).`);
+      setNotice(missing.length ? `zip을 받았습니다(파일 ${files.length}개). 그림 ${missing.length}개는 저장소에 없어 빈 자리로 냈습니다.` : `zip을 받았습니다(파일 ${files.length}개).`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '[downloadCodeZip] zip 만들기 실패');
     }
