@@ -2,7 +2,7 @@ import { variantName, walkPage, type Component, type DesignDocument, type Design
 import { formatTracks } from './gridLayout';
 import { hasMask, maskImageUrl, maskRuns } from './mask';
 import { applyPoint, center, invert, isFlipped, linearPart, multiply, rotationDegrees, worldMatrix } from './geometry';
-import { fontStack, pathPaint, paintsToBackground, strokeAndEffectCss, textCss, textRuns, withAlpha } from './styleCss';
+import { adjustedImageFill, fontStack, pathPaint, paintsToBackground, strokeAndEffectCss, textCss, textRuns, withAlpha } from './styleCss';
 import { pathToD } from './path';
 import { cssText, declarations, kebab, tokenCss, tokenVars, typographyVar, uniqueIn, withTokens, type CssRule, type Style, type TokenVars } from './exportCss';
 import { boxElement, cleanName, controlState, fieldControl, fieldKind, firstText, hasRole, inputElement, isIcon, selectBox, textElement, VISUALLY_HIDDEN, type ControlState, type Element, type FieldKind } from './exportMarkup';
@@ -199,6 +199,8 @@ function layoutStyle(node: DesignNode): Style {
 /** 채우기. 단색 하나뿐이면 background-color로 쓰고(퍼블리셔가 고치기 쉬운 형태), 여러 겹·그라디언트·그림은 background 겹으로 쓴다. */
 function fillStyle(node: DesignNode, asset: StyleHints['asset']): Style {
   if (node.type !== 'frame' && node.type !== 'rectangle' && node.type !== 'ellipse') return {};
+  // 색 보정한 그림은 요소가 아니라 ::before 겹에 그린다(addRule).
+  if (adjustedImageFill(node)) return {};
   const [bottom, ...rest] = node.fills;
   if (bottom?.type === 'solid') {
     const color = withAlpha(bottom.color, bottom.opacity ?? 1);
@@ -447,8 +449,15 @@ function addRule(context: RenderContext, className: string, node: DesignNode, pa
   const hints: StyleHints = { fluid: root && context.fluid, control: element.tag === 'input' || element.tag === 'textarea', asset: (id) => { state.assets.add(id); return state.assetFile(id); } };
   const style: Style = { ...element.reset, ...styleFor(node, parent, hints), ...extra };
   if (element.tag === 'img') delete style.background;
+  // 색 보정한 그림은 ::before 겹에만 filter를 건다. isolation으로 쌓임 맥락을 만들어 z-index -1 겹이 요소 배경 위·자식 아래에 깔리게 한다.
+  const adjusted = adjustedImageFill(node);
+  if (adjusted) style.isolation = 'isolate';
   const final = withTokens(withTypography(style, node, state.vars), node, state.vars);
   context.rules.push({ selector: `.${className}`, style: final, keepOrder: root && context.component });
+  if (adjusted) {
+    const background = paintsToBackground([adjusted.paint], node.width, node.height, (assetId) => `./assets/${hints.asset(assetId)}`)!;
+    context.rules.push({ selector: `.${className}::before`, style: { content: '""', position: 'absolute', inset: '0', zIndex: '-1', borderRadius: 'inherit', background, filter: adjusted.filter, pointerEvents: 'none' } });
+  }
   const stacked = stackOnNarrow(node, final, context);
   if (stacked) context.rules.push({ selector: `.${className}`, style: stacked, media: NARROW_MEDIA });
   if ((element.tag === 'input' || element.tag === 'textarea') && final.color !== undefined) context.rules.push({ selector: `.${className}::placeholder`, style: { color: final.color, opacity: 1 } });

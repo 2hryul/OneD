@@ -47,8 +47,8 @@ export function importFigFile(bytes: Uint8Array, rootId: string): FigImportResul
   return importFigNode(parseFig(bytes), rootId);
 }
 
-/** 가져오기 창에 보여 줄 프레임 하나. page는 그 프레임이 있는 페이지 이름이다. */
-export interface FigFrameEntry { id: string; name: string; page: string; width: number; height: number }
+/** 가져오기 창에 보여 줄 프레임(또는 맨 위 도형) 하나. page는 그 노드가 있는 페이지 이름, type은 Figma 노드 종류다. */
+export interface FigFrameEntry { id: string; name: string; page: string; width: number; height: number; type: string }
 
 const FRAME_TYPES = new Set(['FRAME', 'COMPONENT', 'SYMBOL', 'COMPONENT_SET', 'INSTANCE', 'GROUP']);
 
@@ -57,11 +57,23 @@ const FRAME_TYPES = new Set(['FRAME', 'COMPONENT', 'SYMBOL', 'COMPONENT_SET', 'I
  * Figma 링크가 없는 로컬 파일은 node-id를 알 방법이 없어 이 목록에서 고르게 한다. 라이브러리용 숨은 페이지(internalOnly)는 뺀다.
  */
 export function listFigFrames(fig: FigDocument): FigFrameEntry[] {
+  return topLevelEntries(fig, (node) => FRAME_TYPES.has(node.type as string));
+}
+
+/**
+ * 페이지 맨 위(또는 섹션 바로 아래)의 프레임이 아닌 도형(사각형·벡터·텍스트 등). 맨 위에 프레임이 없는 파일에서
+ * 목록이 비지 않도록 가져오기 창이 대신 보여 주는 후보다. 도형 하나도 루트로 가져올 수 있다.
+ */
+export function listFigTopNodes(fig: FigDocument): FigFrameEntry[] {
+  return topLevelEntries(fig, (node) => !FRAME_TYPES.has(node.type as string));
+}
+
+function topLevelEntries(fig: FigDocument, accept: (node: FigNode) => boolean): FigFrameEntry[] {
   const entries: FigFrameEntry[] = [];
   const idOf = (node: FigNode): string => `${node.guid?.sessionID}:${node.guid?.localID}`;
   for (const page of fig.nodes.filter((node) => node.type === 'CANVAS' && !(node as { internalOnly?: boolean }).internalOnly)) {
     const add = (node: FigNode): void => {
-      if (node.size && FRAME_TYPES.has(node.type as string)) entries.push({ id: idOf(node), name: node.name ?? idOf(node), page: page.name ?? '', width: Math.round(node.size.x), height: Math.round(node.size.y) });
+      if (node.size && node.type !== 'SECTION' && accept(node)) entries.push({ id: idOf(node), name: node.name || idOf(node), page: page.name ?? '', width: Math.round(node.size.x), height: Math.round(node.size.y), type: String(node.type) });
     };
     for (const top of childrenOf(fig, idOf(page))) {
       if (top.type === 'SECTION') childrenOf(fig, idOf(top)).forEach(add);

@@ -28,7 +28,7 @@ import { measureBetween } from './measure';
 import type { PluginHost, PluginInfo } from './pluginApi';
 import { LayersPanel, PagesPanel, PropertiesPanel, type DropPosition } from './panels';
 import { exportTsx } from './export';
-import { figmaNodeId, importFigFile, importFigNode, listFigFrames, type FigFrameEntry, type ImportReport } from './figmaImport';
+import { figmaNodeId, importFigFile, importFigNode, listFigFrames, listFigTopNodes, type FigFrameEntry, type ImportReport } from './figmaImport';
 import { parseFig, type FigDocument } from 'openfig-core';
 import { base64ToBytes, bytesToBase64, contentId, getAssets, putAssets, readImageSize, referencedAssets, sniffImageMime, type AssetRecord } from './assets';
 import { ImportReportModal } from './report';
@@ -191,6 +191,8 @@ export function App(): JSX.Element {
   const [pendingFig, setPendingFig] = useState<File | null>(null);
   // 열어 둔 .fig의 해석 결과와 프레임 목록. 목록을 만들 때 한 번 해석한 것을 가져오기에 다시 쓴다(큰 파일은 해석이 오래 걸린다).
   const [figFrames, setFigFrames] = useState<FigFrameEntry[]>([]);
+  // 맨 위에 프레임이 없어 figFrames에 프레임 대신 맨 위 도형 후보를 담았는지.
+  const [figListIsNodes, setFigListIsNodes] = useState(false);
   const figDocRef = useRef<FigDocument | null>(null);
   const [figInput, setFigInput] = useState('');
   const [importing, setImporting] = useState(false);
@@ -1085,11 +1087,14 @@ export function App(): JSX.Element {
       if (file.name.toLowerCase().endsWith('.fig')) {
         const fig = parseFig(new Uint8Array(await file.arrayBuffer()));
         const frames = listFigFrames(fig);
+        // 맨 위가 도형·벡터뿐인 파일은 프레임 목록이 빈다. 그 도형들을 후보로 보여 주고 창에서 안내한다.
+        const entries = frames.length ? frames : listFigTopNodes(fig);
         figDocRef.current = fig;
-        setFigFrames(frames);
+        setFigFrames(entries);
+        setFigListIsNodes(!frames.length);
         setPendingFig(file);
-        // 프레임이 하나뿐이면 바로 고른다.
-        setFigInput(frames.length === 1 ? frames[0]!.id : '');
+        // 후보가 하나뿐이면 바로 고른다.
+        setFigInput(entries.length === 1 ? entries[0]!.id : '');
       } else {
         const raw = await file.text();
         const loaded = parseDocument(raw);
@@ -1102,7 +1107,7 @@ export function App(): JSX.Element {
   };
 
   /** 가져오기 창을 닫고 열어 둔 .fig 해석 결과를 버린다(메모리에 큰 파일을 붙잡지 않게). */
-  const closeFigImport = (): void => { setPendingFig(null); setFigFrames([]); figDocRef.current = null; };
+  const closeFigImport = (): void => { setPendingFig(null); setFigFrames([]); setFigListIsNodes(false); figDocRef.current = null; };
 
   const importPendingFig = async (): Promise<void> => {
     if (!pendingFig) return;
@@ -1243,7 +1248,7 @@ export function App(): JSX.Element {
 
       <footer className="statusbar"><span>{notice}{recovery ? <button className="recovery-link" onClick={() => download('canvas-studio-recovery.json', recovery, 'application/json')}>복구본 다운로드</button> : null}</span><button className="renderer-toggle" title="렌더러 바꾸기: 자동(보이는 도형 3,000개 초과 시 Canvas) → DOM → Canvas" onClick={cycleRenderer}>{useCanvas ? 'Canvas' : 'DOM'}{rendererPref === 'auto' ? ' (자동)' : ''}</button> <span>{shapeCount} layers · {selected ? selected.name : liveSelection.length > 1 ? `${liveSelection.length}개 선택` : '선택 없음'}</span></footer>
 
-      {pendingFig ? <div className="modal-backdrop"><section className="import-modal"><header><strong>Figma 프레임 가져오기</strong><button aria-label="닫기" onClick={closeFigImport}>×</button></header><p>{pendingFig.name}</p>{figFrames.length ? <label className="field full"><span>파일 안의 프레임 ({figFrames.length}개)</span><select value={figFrames.some((frame) => frame.id === figmaNodeId(figInput)) ? figmaNodeId(figInput)! : ''} onChange={(event) => setFigInput(event.target.value)}><option value="">프레임 고르기</option>{[...new Set(figFrames.map((frame) => frame.page))].map((pageName) => <optgroup key={pageName} label={pageName}>{figFrames.filter((frame) => frame.page === pageName).map((frame) => <option key={frame.id} value={frame.id}>{frame.name} · {frame.width}×{frame.height}</option>)}</optgroup>)}</select></label> : null}<label className="field full"><span>또는 Figma 링크·node-id</span><input autoFocus placeholder="https://www.figma.com/design/...?node-id=779-23219" value={figInput} onChange={(event) => setFigInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void importPendingFig(); }} /></label><small>현재 프레임의 노드와 참조 컴포넌트를 로컬에서 읽습니다. 이미지·그라디언트·일부 벡터와 override의 표현은 아직 근사치입니다.</small><footer><button onClick={closeFigImport}>취소</button><button className="primary" disabled={importing} onClick={() => void importPendingFig()}>{importing ? '가져오는 중…' : '가져오기'}</button></footer></section></div> : null}
+      {pendingFig ? <div className="modal-backdrop"><section className="import-modal"><header><strong>Figma 프레임 가져오기</strong><button aria-label="닫기" onClick={closeFigImport}>×</button></header><p>{pendingFig.name}</p>{figListIsNodes ? <p className="import-notice" role="status">이 파일의 페이지 맨 위에는 프레임이 없습니다. {figFrames.length ? '아래 목록에서 맨 위 도형을 고르거나 ' : ''}가져올 노드의 Figma 링크나 node-id(예: 1:2)를 입력하세요.</p> : null}{figFrames.length ? <label className="field full"><span>{figListIsNodes ? `페이지 맨 위 도형 (${figFrames.length}개)` : `파일 안의 프레임 (${figFrames.length}개)`}</span><select value={figFrames.some((frame) => frame.id === figmaNodeId(figInput)) ? figmaNodeId(figInput)! : ''} onChange={(event) => setFigInput(event.target.value)}><option value="">{figListIsNodes ? '도형 고르기' : '프레임 고르기'}</option>{[...new Set(figFrames.map((frame) => frame.page))].map((pageName) => <optgroup key={pageName} label={pageName}>{figFrames.filter((frame) => frame.page === pageName).map((frame) => <option key={frame.id} value={frame.id}>{frame.name} · {figListIsNodes ? `${frame.type} · ` : ''}{frame.width}×{frame.height}{figListIsNodes ? ` · ${frame.id}` : ''}</option>)}</optgroup>)}</select></label> : null}<label className="field full"><span>또는 Figma 링크·node-id</span><input autoFocus placeholder="https://www.figma.com/design/...?node-id=779-23219" value={figInput} onChange={(event) => setFigInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void importPendingFig(); }} /></label><small>현재 프레임의 노드와 참조 컴포넌트를 로컬에서 읽습니다. 이미지·그라디언트·일부 벡터와 override의 표현은 아직 근사치입니다.</small><footer><button onClick={closeFigImport}>취소</button><button className="primary" disabled={importing} onClick={() => void importPendingFig()}>{importing ? '가져오는 중…' : '가져오기'}</button></footer></section></div> : null}
 
       {importReport ? <ImportReportModal report={importReport} onClose={() => setImportReport(null)} onDownload={() => download('import-report.json', JSON.stringify(importReport, null, 2), 'application/json')} /> : null}
 

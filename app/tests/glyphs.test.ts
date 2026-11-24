@@ -71,8 +71,8 @@ describe('frame list for local .fig files', () => {
     const library = f(5, 'SYMBOL', 'Button');
     const fig = figOf([page, hidden, card, section, inSection, loose, library], { '1:10': [card, section, loose], '1:2': [inSection], '1:11': [library] });
     expect(listFigFrames(fig)).toEqual([
-      { id: '1:1', name: 'First success', page: 'Examples', width: 320, height: 180 },
-      { id: '1:3', name: 'Login', page: 'Examples', width: 375, height: 812 }
+      { id: '1:1', name: 'First success', page: 'Examples', width: 320, height: 180, type: 'FRAME' },
+      { id: '1:3', name: 'Login', page: 'Examples', width: 375, height: 812, type: 'FRAME' }
     ]);
   });
 });

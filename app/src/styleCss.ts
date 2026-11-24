@@ -1,4 +1,4 @@
-import { primaryColor, type DesignNode, type GradientStop, type ImageFit, type Paint, type UnitPoint } from './model';
+import { primaryColor, type DesignNode, type GradientStop, type ImageAdjust, type ImageFit, type Paint, type UnitPoint } from './model';
 
 /** 캔버스와 React 출력이 같은 규칙으로 쓰는 CSS 속성 묶음. React style 객체 키 이름을 쓴다. */
 export type CssStyle = Partial<Record<'background' | 'boxShadow' | 'outline' | 'outlineOffset' | 'filter' | 'backdropFilter' | 'color' | 'textAlign' | 'lineHeight' | 'letterSpacing' | 'justifyContent', string>>;
@@ -44,6 +44,26 @@ export function linearGradient(from: UnitPoint, to: UnitPoint, stops: readonly G
 
 function stopList(stops: readonly GradientStop[], alpha: number, place: (offset: number) => number): string {
   return stops.map((stop) => `${withAlpha(stop.color, alpha)} ${round(place(stop.offset) * 100)}%`).join(', ');
+}
+
+/** 그림 색 보정을 CSS filter 값으로. 보정이 없으면 undefined. Canvas 2D의 ctx.filter도 같은 문법을 받는다. */
+export function imageFilterCss(adjust: ImageAdjust | undefined): string | undefined {
+  if (!adjust) return undefined;
+  const parts = (['brightness', 'contrast', 'saturate'] as const).flatMap((key) => (adjust[key] !== undefined ? [`${key}(${round(adjust[key]!)})`] : []));
+  return parts.length ? parts.join(' ') : undefined;
+}
+
+/**
+ * 색 보정을 그 그림에만 걸어야 하는 채우기. CSS는 background 겹 하나에만 filter를 걸 수 없으므로, 채우기가 보정한 그림
+ * 하나뿐인 프레임·사각형·타원은 그림을 요소 안의 별도 겹(DOM 렌더러는 span, React 출력은 ::before)에 그리고 그 겹에만 filter를 건다.
+ * 요소에 걸지 않으므로 선·그림자·자식은 보정되지 않는다(Canvas·SVG와 같다). 여러 겹 채우기 속 그림의 보정은
+ * DOM·React에서 빠지고 Canvas·SVG만 그 겹에 적용한다(가져오기 보고서에 적는다).
+ */
+export function adjustedImageFill(node: DesignNode): { paint: Extract<Paint, { type: 'image' }>; filter: string } | null {
+  if ((node.type !== 'frame' && node.type !== 'rectangle' && node.type !== 'ellipse') || node.fills.length !== 1) return null;
+  const paint = node.fills[0]!;
+  const filter = paint.type === 'image' ? imageFilterCss(paint.adjust) : undefined;
+  return paint.type === 'image' && filter ? { paint, filter } : null;
 }
 
 /**

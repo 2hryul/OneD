@@ -2,7 +2,7 @@ import { primaryColor, type DesignNode, type Matrix, type Page, type Paint } fro
 import { boundsOf, multiply, worldCorners, worldMatrix, type Rect } from './geometry';
 import { pathToD } from './path';
 import { maskShapes } from './mask';
-import { DEFAULT_FONT_STACK, fontStack, textRuns, withAlpha } from './styleCss';
+import { DEFAULT_FONT_STACK, fontStack, imageFilterCss, textRuns, withAlpha } from './styleCss';
 import { glyphOutline } from './glyphs';
 
 /** 화면 상태. pan은 화면 픽셀, zoom은 배율, dpr은 장치 픽셀 비율이다. */
@@ -295,6 +295,9 @@ function drawImage(state: DrawState, node: DesignNode, shape: Path2D, paint: Ext
   ctx.clip(shape, fillRuleOf(node));
   if (!image) { ctx.fillStyle = '#e6e8ee'; ctx.fillRect(0, 0, node.width, node.height); ctx.restore(); return; }
   ctx.globalAlpha *= paint.opacity ?? 1;
+  // 레이어 흐림(withEffects가 건 blur) 뒤에 이어 붙인다. 덮어쓰면 흐림이 사라진다. save/restore 안이라 다음 그리기로 새지 않는다.
+  const filter = imageFilterCss(paint.adjust);
+  if (filter) ctx.filter = ctx.filter && ctx.filter !== 'none' ? `${ctx.filter} ${filter}` : filter;
   const iw = (image as HTMLImageElement).naturalWidth || node.width;
   const ih = (image as HTMLImageElement).naturalHeight || node.height;
   if (paint.fit === 'tile') {
